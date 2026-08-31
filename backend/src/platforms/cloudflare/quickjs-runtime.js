@@ -18,20 +18,13 @@ const cloudflareVariant = newVariant(quickJSVariant, {
     wasmModule: quickJSWasmModule,
 });
 
-let quickJSModulePromise;
 let quickJSRuntimePromise;
-
-function getQuickJSModule() {
-    if (!quickJSModulePromise) {
-        quickJSModulePromise =
-            newQuickJSWASMModuleFromVariant(cloudflareVariant);
-    }
-    return quickJSModulePromise;
-}
 
 function getQuickJSRuntime() {
     if (!quickJSRuntimePromise) {
-        quickJSRuntimePromise = getQuickJSModule()
+        quickJSRuntimePromise = newQuickJSWASMModuleFromVariant(
+            cloudflareVariant,
+        )
             .then((QuickJS) => {
                 const runtime = QuickJS.newRuntime();
                 runtime.setMemoryLimit(MEMORY_LIMIT_BYTES);
