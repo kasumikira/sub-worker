@@ -6,6 +6,5 @@
   "durable_objects": {
     "bindings": [{ "name": "SUB_STORE", "class_name": "SubStoreDO" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SubStoreDO"] }],
-  "vars": { "SUB_STORE_INSTANCE": "default" }
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SubStoreDO"] }]
 }
