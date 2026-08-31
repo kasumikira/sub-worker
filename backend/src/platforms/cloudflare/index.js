@@ -23,6 +23,20 @@ function unauthorized(message = 'Unauthorized') {
 function authorizeRequest(request, env) {
     const url = new URL(request.url);
     const backendPath = env.SUB_STORE_FRONTEND_BACKEND_PATH;
+    const hasValidBackendPath =
+        backendPath?.startsWith('/') && !backendPath.endsWith('/');
+
+    if (hasValidBackendPath) {
+        if (url.pathname === backendPath) {
+            url.pathname = `${backendPath}/`;
+            return Response.redirect(url.toString(), 302);
+        }
+        if (url.pathname.startsWith(`${backendPath}/`)) {
+            url.pathname = url.pathname.slice(backendPath.length) || '/';
+            return new Request(url.toString(), request);
+        }
+    }
+
     const isPublic = PUBLIC_API_PATH.test(url.pathname);
     const isManagementApi =
         url.pathname === '/api' || url.pathname.startsWith('/api/');
@@ -31,27 +45,10 @@ function authorizeRequest(request, env) {
     if (!backendPath) {
         return unauthorized('Management API authentication is not configured');
     }
-    if (!backendPath.startsWith('/') || backendPath.endsWith('/')) {
+    if (!hasValidBackendPath) {
         return unauthorized('Invalid management API authentication configuration');
     }
     return unauthorized();
-}
-
-function authorizePrefixedRequest(request, env) {
-    const backendPath = env.SUB_STORE_FRONTEND_BACKEND_PATH;
-    if (!backendPath || !backendPath.startsWith('/') || backendPath.endsWith('/')) {
-        return authorizeRequest(request, env);
-    }
-    const url = new URL(request.url);
-    if (url.pathname === backendPath) {
-        url.pathname = `${backendPath}/`;
-        return Response.redirect(url.toString(), 302);
-    }
-    if (url.pathname.startsWith(`${backendPath}/`)) {
-        url.pathname = url.pathname.slice(backendPath.length) || '/';
-        return new Request(url.toString(), request);
-    }
-    return authorizeRequest(request, env);
 }
 
 export class SubStoreDO {
@@ -110,17 +107,12 @@ export class SubStoreDO {
 
 export default {
     async fetch(request, env) {
-        const authorized = authorizePrefixedRequest(request, env);
+        const authorized = authorizeRequest(request, env);
         if (authorized instanceof Response) return authorized;
         try {
-            const response = await env.SUB_STORE.getByName(
-                DURABLE_OBJECT_NAME,
-            ).fetch(authorized);
-            return new Response(response.body, {
-                status: response.status,
-                statusText: response.statusText,
-                headers: response.headers,
-            });
+            return await env.SUB_STORE.getByName(DURABLE_OBJECT_NAME).fetch(
+                authorized,
+            );
         } catch (error) {
             console.error('[Cloudflare] Durable Object request failed', error);
             throw error;

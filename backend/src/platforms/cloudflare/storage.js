@@ -31,11 +31,7 @@ export class DOStorageAdapter {
     }
 
     loadCache() {
-        return structuredClone(this.loadBucket('cache'));
-    }
-
-    loadRoot() {
-        return this.loadBucket('root');
+        return this.loadBucket('cache');
     }
 
     getRoot(key) {
@@ -56,25 +52,15 @@ export class DOStorageAdapter {
         }
         for (const [key, value] of Object.entries(cache)) {
             const storedKey = storageKey('cache', key);
-            const stored = existing.has(storedKey)
-                ? JSON.parse(existing.get(storedKey))
-                : undefined;
-            if (JSON.stringify(stored) !== JSON.stringify(value)) {
-                this.kv.put(storedKey, encodeValue('cache', key, value));
+            const encoded = encodeValue('cache', key, value);
+            if (existing.get(storedKey) !== encoded) {
+                this.kv.put(storedKey, encoded);
             }
         }
     }
 
-    putCache(key, value) {
-        this.kv.put(storageKey('cache', key), encodeValue('cache', key, value));
-    }
-
     putRoot(key, value) {
         this.kv.put(storageKey('root', key), encodeValue('root', key, value));
-    }
-
-    deleteCache(key) {
-        this.kv.delete(storageKey('cache', key));
     }
 
     deleteRoot(key) {
