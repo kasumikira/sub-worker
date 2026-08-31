@@ -1,12 +1,15 @@
 /* eslint-disable no-undef */
 import { installConsoleLogCapture } from '@/utils/debug-logs';
 
+const isWorker =
+    globalThis.__SUB_STORE_RUNTIME__ === 'cloudflare-worker' ||
+    (typeof WebSocketPair !== 'undefined' && typeof caches !== 'undefined');
 const isQX = typeof $task !== 'undefined';
 const isLoon = typeof $loon !== 'undefined';
 const isEgern = 'undefined' !== typeof Egern;
 // 可能有一些兼容环境依赖于这个, 先不改成 $environment.surge-version
-const isSurge = typeof $httpClient !== 'undefined' && !isLoon && !isEgern;
-const isNode = eval(`typeof process !== "undefined"`); // eval is needed in order to avoid browserify processing
+const isSurge = typeof $httpClient !== 'undefined' && !isWorker && !isLoon && !isEgern;
+const isNode = !isWorker && eval(`typeof process !== "undefined"`); // eval is needed in order to avoid browserify processing
 const isStash =
     'undefined' !== typeof $environment && $environment['stash-version'];
 const isShadowRocket = 'undefined' !== typeof $rocket;
@@ -106,7 +109,7 @@ export class OpenAPI {
     initCache() {
         if (isQX)
             this.cache = JSON.parse($prefs.valueForKey(this.name) || '{}');
-        if (isLoon || isSurge || isEgern)
+        if (isLoon || isSurge || isWorker || isEgern)
             this.cache = JSON.parse($persistentStore.read(this.name) || '{}');
         if (isGUIforCores)
             this.cache = JSON.parse(
@@ -183,7 +186,7 @@ export class OpenAPI {
     persistCache() {
         const data = JSON.stringify(this.cache, null, 2);
         if (isQX) $prefs.setValueForKey(data, this.name);
-        if (isLoon || isSurge || isEgern)
+        if (isLoon || isSurge || isWorker || isEgern)
             $persistentStore.write(data, this.name);
         if (isGUIforCores) $Plugins.SubStoreCache.set(this.name, data);
         if (isNode) {
@@ -209,7 +212,7 @@ export class OpenAPI {
         this.log(`SET ${key}`);
         if (key.indexOf('#') !== -1) {
             key = key.substr(1);
-            if (isSurge || isLoon || isEgern) {
+            if (isSurge || isLoon || isWorker || isEgern) {
                 return $persistentStore.write(data, key);
             }
             if (isQX) {
@@ -231,7 +234,7 @@ export class OpenAPI {
         this.log(`READ ${key}`);
         if (key.indexOf('#') !== -1) {
             key = key.substr(1);
-            if (isSurge || isLoon || isEgern) {
+            if (isSurge || isLoon || isWorker || isEgern) {
                 return $persistentStore.read(key);
             }
             if (isQX) {
@@ -252,7 +255,7 @@ export class OpenAPI {
         this.log(`DELETE ${key}`);
         if (key.indexOf('#') !== -1) {
             key = key.substr(1);
-            if (isSurge || isLoon || isEgern) {
+            if (isSurge || isLoon || isWorker || isEgern) {
                 return $persistentStore.write(null, key);
             }
             if (isQX) {
@@ -295,6 +298,13 @@ export class OpenAPI {
             } else {
                 $notification.post(title, subtitle, content, opts);
             }
+        }
+        if (isWorker) {
+            const content_ =
+                content +
+                (openURL ? `\n点击跳转: ${openURL}` : '') +
+                (mediaURL ? `\n多媒体: ${mediaURL}` : '');
+            console.log(`[Notify] ${title}\n${subtitle}\n${content_}\n\n`);
         }
         if (isNode) {
             const content_ =
@@ -389,7 +399,7 @@ export class OpenAPI {
     }
 
     done(value = {}) {
-        if (isQX || isLoon || isSurge || isGUIforCores || isEgern) {
+        if (isQX || isLoon || isSurge || isWorker || isGUIforCores || isEgern) {
             $done(value);
         } else if (isNode) {
             if (typeof $context !== 'undefined') {
@@ -407,6 +417,7 @@ export function ENV() {
         isLoon,
         isSurge,
         isNode,
+        isWorker,
         isStash,
         isShadowRocket,
         isEgern,
@@ -416,7 +427,7 @@ export function ENV() {
 }
 
 export function HTTP(defaultOptions = { baseURL: '' }) {
-    const { isQX, isLoon, isSurge, isNode, isGUIforCores, isEgern } = ENV();
+    const { isQX, isLoon, isSurge, isWorker, isNode, isGUIforCores, isEgern } = ENV();
     const methods = [
         'GET',
         'POST',
@@ -475,7 +486,7 @@ export function HTTP(defaultOptions = { baseURL: '' }) {
                 body: options.body,
                 opts: options.opts,
             });
-        } else if (isLoon || isSurge || isNode || isEgern) {
+        } else if (isLoon || isSurge || isWorker || isNode || isEgern) {
             worker = new Promise((resolve, reject) => {
                 const body = options.body;
                 const opts = JSON.parse(JSON.stringify(options));

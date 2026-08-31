@@ -5,6 +5,30 @@
 
 > Advanced Subscription Manager for QX, Loon, Surge, Stash, Egern and Shadowrocket
 
+## Cloudflare Workers backend
+
+This target uses one Durable Object to serialize access and to persist data in
+its own built-in SQLite storage, so no external database is required. To build
+and deploy:
+
+```sh
+cd backend
+pnpm bundle:cloudflare
+cd ..
+pnpm dlx wrangler@latest deploy
+```
+
+The included `deploy-cloudflare.yml` workflow deploys pushes to `master` and
+also supports manual runs. Add `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` to the repository's GitHub Actions secrets. The
+workflow does not receive or manage the runtime authentication secret.
+
+After deployment, set `SUB_STORE_FRONTEND_BACKEND_PATH` as an encrypted Secret
+in the Worker's Cloudflare dashboard settings before using the management API.
+Do not pass this runtime secret through the deployment workflow. The official
+frontend `https://sub-store.vercel.app` is in the default CORS allowlist; this
+Worker does not deploy frontend assets.
+
 [![Build](https://github.com/sub-store-org/Sub-Store/actions/workflows/main.yml/badge.svg)](https://github.com/sub-store-org/Sub-Store/actions/workflows/main.yml) ![GitHub](https://img.shields.io/github/license/sub-store-org/Sub-Store) ![GitHub issues](https://img.shields.io/github/issues/sub-store-org/Sub-Store) ![GitHub closed pull requests](https://img.shields.io/github/issues-pr-closed-raw/Peng-Ym/Sub-Store) ![Size](https://img.shields.io/github/languages/code-size/sub-store-org/Sub-Store)
 <br>
 <a href="https://trendshift.io/repositories/4572" target="_blank"><img src="https://trendshift.io/api/badge/repositories/4572" alt="sub-store-org%2FSub-Store | Trendshift" height="25"/></a>
