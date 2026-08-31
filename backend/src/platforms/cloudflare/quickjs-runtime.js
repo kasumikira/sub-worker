@@ -6,6 +6,7 @@ import {
     shouldInterruptAfterDeadline,
 } from 'quickjs-emscripten-core';
 import { registerDynamicFunctionFactory } from '@/utils/dynamic-function-runtime';
+import { $persistentStore as workerPersistentStore } from './legacy-globals';
 
 const MEMORY_LIMIT_BYTES = 32 * 1024 * 1024;
 const STACK_LIMIT_BYTES = 512 * 1024;
@@ -341,10 +342,7 @@ function installUnsupportedGlobals(vm, $substore) {
         '$persistentStore',
         createHostNamespace(
             vm,
-            {
-                read: $substore.read.bind($substore),
-                write: $substore.write.bind($substore),
-            },
+            workerPersistentStore,
             '$persistentStore',
         ),
     );

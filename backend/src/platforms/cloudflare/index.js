@@ -7,6 +7,7 @@ import { registerQuickJSRuntime } from './quickjs-runtime';
 
 registerQuickJSRuntime();
 
+const DURABLE_OBJECT_NAME = 'default';
 const PUBLIC_API_PATH = /^\/(api\/(download|preview|sub\/flow)|download|share)(\/|$)/;
 
 function unauthorized(message = 'Unauthorized') {
@@ -111,11 +112,10 @@ export default {
     async fetch(request, env) {
         const authorized = authorizePrefixedRequest(request, env);
         if (authorized instanceof Response) return authorized;
-        const name = env.SUB_STORE_INSTANCE || 'default';
         try {
-            const response = await env.SUB_STORE.getByName(name).fetch(
-                authorized,
-            );
+            const response = await env.SUB_STORE.getByName(
+                DURABLE_OBJECT_NAME,
+            ).fetch(authorized);
             return new Response(response.body, {
                 status: response.status,
                 statusText: response.statusText,
