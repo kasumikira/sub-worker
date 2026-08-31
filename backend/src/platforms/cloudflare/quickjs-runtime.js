@@ -188,9 +188,12 @@ function setGlobal(vm, name, handle) {
     }
 }
 
-function createUnsupportedNamespace(features) {
+function createUnsupportedNamespace(namespace, methods) {
     return Object.fromEntries(
-        features.map((feature) => [feature, unsupportedFunction(feature)]),
+        methods.map((method) => [
+            method,
+            unsupportedFunction(`${namespace}.${method}`),
+        ]),
     );
 }
 
@@ -219,15 +222,15 @@ function createSafeBindings(bindings) {
         warn: $substore.warn.bind($substore),
         error: $substore.error.bind($substore),
         notify: $substore.notify.bind($substore),
-        http: createUnsupportedNamespace([
-            '$substore.http.request',
-            '$substore.http.get',
-            '$substore.http.post',
-            '$substore.http.put',
-            '$substore.http.patch',
-            '$substore.http.delete',
-            '$substore.http.head',
-            '$substore.http.options',
+        http: createUnsupportedNamespace('$substore.http', [
+            'request',
+            'get',
+            'post',
+            'put',
+            'patch',
+            'delete',
+            'head',
+            'options',
         ]),
     };
     const safeLodash = Object.fromEntries(
@@ -327,12 +330,12 @@ function installUnsupportedGlobals(vm, $substore) {
         '$httpClient',
         createHostNamespace(
             vm,
-            createUnsupportedNamespace([
-                '$httpClient.get',
-                '$httpClient.post',
-                '$httpClient.put',
-                '$httpClient.patch',
-                '$httpClient.delete',
+            createUnsupportedNamespace('$httpClient', [
+                'get',
+                'post',
+                'put',
+                'patch',
+                'delete',
             ]),
             '$httpClient',
         ),
