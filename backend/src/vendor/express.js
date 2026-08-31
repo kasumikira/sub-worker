@@ -241,7 +241,7 @@ export default function express({ substore: $, port, host }) {
 
     function Response(corsHeaders = {}) {
         let statusCode = 200;
-        const { isQX, isLoon, isSurge, isGUIforCores, isEgern } = ENV();
+        const { isQX, isLoon, isSurge, isWorker, isGUIforCores, isEgern } = ENV();
         const headers = {
             ...DEFAULT_HEADERS,
             ...corsHeaders,
@@ -270,7 +270,7 @@ export default function express({ substore: $, port, host }) {
                 };
                 if (isQX || isGUIforCores) {
                     $done(response);
-                } else if (isLoon || isSurge || isEgern) {
+                } else if (isLoon || isSurge || isWorker || isEgern) {
                     $done({
                         response,
                     });

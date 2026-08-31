@@ -134,7 +134,7 @@ export default function serve() {
     registerLogRoutes($app);
     registerAgeRoutes($app);
 
-    $app.start();
+    if (!$.env.isWorker) $app.start();
 
     if ($.env.isNode) {
         startArtifactCronJobs(syncArtifactItem);
@@ -513,4 +513,5 @@ export default function serve() {
                 });
         }
     }
+    return $app;
 }
