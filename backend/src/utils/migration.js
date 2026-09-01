@@ -68,7 +68,7 @@ function doMigrationV2() {
     $.write(newTokens, TOKENS_KEY);
 
     // 7. delete builtin rules
-    delete $.cache.builtin;
+    $.delete('builtin');
     $.info('Migration complete!');
 
     function migrateDisplayName(item) {

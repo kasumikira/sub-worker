@@ -1,6 +1,7 @@
 import { DOStorageAdapter } from './storage';
 import {
     attachPersistentStore,
+    runWithInitializationStorage,
     runWithLegacyGlobals,
 } from './legacy-globals';
 import { registerQuickJSRuntime } from './quickjs-runtime';
@@ -57,15 +58,17 @@ export class SubStoreDO {
         this.requestQueue = Promise.resolve();
         this.ready = ctx.blockConcurrencyWhile(async () => {
             const { default: $ } = await import('@/core/app');
-            attachPersistentStore(this.storage, $);
+            attachPersistentStore($);
 
-            const [{ default: migrate }, { default: serve }] =
-                await Promise.all([
-                    import('@/utils/migration'),
-                    import('@/restful'),
-                ]);
-            migrate();
-            this.app = serve();
+            await runWithInitializationStorage(this.storage, async () => {
+                const [{ default: migrate }, { default: serve }] =
+                    await Promise.all([
+                        import('@/utils/migration'),
+                        import('@/restful'),
+                    ]);
+                migrate();
+                this.app = serve();
+            });
         });
     }
 
