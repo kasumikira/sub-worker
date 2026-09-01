@@ -1,8 +1,11 @@
+import { migrateLegacyKV } from './storage-migration.js';
+
 export const MAX_VALUE_BYTES = 1_900_000;
 
-function storageKey(bucket, key) {
-    return `${bucket}\0${key}`;
-}
+const TABLES = {
+    data: 'sub_store_data',
+    root: 'sub_store_root',
+};
 
 function encodeValue(bucket, key, value) {
     const encoded = JSON.stringify(value);
@@ -15,55 +18,119 @@ function encodeValue(bucket, key, value) {
     return encoded;
 }
 
+function decodeValue(value) {
+    return value == null ? undefined : JSON.parse(value);
+}
+
 export class DOStorageAdapter {
     constructor(storage) {
         if (!storage) throw new Error('Missing Durable Object storage');
-        this.kv = storage.kv;
+        this.storage = storage;
+        this.sql = storage.sql;
+        this.caches = {
+            data: new Map(),
+            root: new Map(),
+        };
+
+        this.sql.exec(`
+            CREATE TABLE IF NOT EXISTS sub_store_data (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS sub_store_root (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID;
+        `);
+        migrateLegacyKV(storage);
     }
 
-    loadBucket(bucket) {
-        const entries = {};
-        const prefix = `${bucket}\0`;
-        for (const [key, value] of this.kv.list({ prefix })) {
-            entries[key.slice(prefix.length)] = JSON.parse(value);
+    get(bucket, key) {
+        const cache = this.caches[bucket];
+        if (!cache.has(key)) {
+            const row = this.sql
+                .exec(`SELECT value FROM ${TABLES[bucket]} WHERE key = ?`, key)
+                .toArray()[0];
+            cache.set(key, decodeValue(row?.value));
         }
-        return entries;
+        return cache.get(key);
     }
 
-    loadCache() {
-        return this.loadBucket('cache');
+    put(bucket, key, value) {
+        try {
+            const encoded = encodeValue(bucket, key, value);
+            this.sql.exec(
+                `INSERT INTO ${TABLES[bucket]} (key, value) VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                 WHERE value <> excluded.value`,
+                key,
+                encoded,
+            );
+        } finally {
+            this.caches[bucket].delete(key);
+        }
+    }
+
+    delete(bucket, key) {
+        try {
+            this.sql.exec(`DELETE FROM ${TABLES[bucket]} WHERE key = ?`, key);
+        } finally {
+            this.caches[bucket].delete(key);
+        }
+    }
+
+    getData(key) {
+        return this.get('data', key);
+    }
+
+    putData(key, value) {
+        this.put('data', key, value);
+    }
+
+    deleteData(key) {
+        this.delete('data', key);
     }
 
     getRoot(key) {
-        const value = this.kv.get(storageKey('root', key));
-        return value == null ? undefined : JSON.parse(value);
-    }
-
-    replaceCache(cache) {
-        const prefix = 'cache\0';
-        const existing = new Map();
-        for (const [key, value] of this.kv.list({ prefix })) {
-            existing.set(key, value);
-        }
-        for (const key of existing.keys()) {
-            if (!Object.hasOwn(cache, key.slice(prefix.length))) {
-                this.kv.delete(key);
-            }
-        }
-        for (const [key, value] of Object.entries(cache)) {
-            const storedKey = storageKey('cache', key);
-            const encoded = encodeValue('cache', key, value);
-            if (existing.get(storedKey) !== encoded) {
-                this.kv.put(storedKey, encoded);
-            }
-        }
+        return this.get('root', key);
     }
 
     putRoot(key, value) {
-        this.kv.put(storageKey('root', key), encodeValue('root', key, value));
+        this.put('root', key, value);
     }
 
     deleteRoot(key) {
-        this.kv.delete(storageKey('root', key));
+        this.delete('root', key);
+    }
+
+    loadData() {
+        const data = {};
+        for (const { key, value } of this.sql.exec(
+            'SELECT key, value FROM sub_store_data',
+        )) {
+            data[key] = JSON.parse(value);
+        }
+        return data;
+    }
+
+    replaceData(data) {
+        try {
+            const entries = Object.entries(data).map(([key, value]) => [
+                key,
+                encodeValue('data', key, value),
+            ]);
+            this.storage.transactionSync(() => {
+                this.sql.exec('DELETE FROM sub_store_data');
+                for (const [key, value] of entries) {
+                    this.sql.exec(
+                        'INSERT INTO sub_store_data (key, value) VALUES (?, ?)',
+                        key,
+                        value,
+                    );
+                }
+            });
+        } finally {
+            this.caches.data.clear();
+        }
     }
 }
