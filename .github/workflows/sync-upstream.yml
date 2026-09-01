@@ -1,0 +1,42 @@
+name: Sync upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Merge upstream
+        run: |
+          git remote add upstream https://github.com/sub-store-org/Sub-Store.git
+          git fetch --no-tags upstream master
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-ff upstream/master -m "chore: merge upstream master"
+
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ github.token }}
+          base: master
+          branch: sync/upstream-master
+          delete-branch: true
+          title: "chore: sync upstream"
+          body: "Automatically generated from sub-store-org/Sub-Store:master."
