@@ -20,22 +20,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: master
+          ref: dev
           fetch-depth: 0
 
-      - name: Merge upstream
+      - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/sub-store-org/Sub-Store.git
           git fetch --no-tags upstream master
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git merge --no-ff upstream/master -m "chore: merge upstream master"
+          git reset --hard upstream/master
 
       - name: Create pull request
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ github.token }}
-          base: master
+          base: dev
           branch: sync/upstream-master
           delete-branch: true
           title: "chore: sync upstream"
