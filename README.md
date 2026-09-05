@@ -169,7 +169,7 @@ sub.store = 127.0.0.1
 
 Sub-Store also supports a configurable browser CORS allowlist for the backend API. This does not change the module rewrite domain, but it limits which browser origins can read API responses through CORS.
 
-- Node/server deployments use `SUB_STORE_CORS_ALLOWED_ORIGINS`; the default is `*` for compatibility.
+- Node/server deployments use `SUB_STORE_CORS_ALLOWED_ORIGINS`; the default is `https://sub-store.vercel.app,http://substore.stash,https://substore.stash`.
 - Proxy App modules use the `cors` module argument; the default is `https://sub-store.vercel.app,http://substore.stash,https://substore.stash`.
 - Multiple origins can be separated by commas. Origins are matched exactly by scheme, host, and port. Set the value to `*` only when you accept the risk of any website reading the local backend through browser CORS.
 
@@ -201,8 +201,8 @@ Sub-Store also supports a configurable browser CORS allowlist for the backend AP
   > [NaiveProxy](https://telegram.me/zhetengsha/4308)
 - [x] QX (SS, SSR, VMess, Trojan, HTTP, SOCKS5, VLESS, AnyTLS)
 - [x] Loon (SS, SSR, VMess, Trojan, HTTP, SOCKS5, SOCKS5-TLS, WireGuard, VLESS, Hysteria 2, AnyTLS)
-- [x] Surge (Direct, SS, VMess, Trojan, HTTP, HTTPS, HTTP/2 CONNECT, SOCKS5, SOCKS5-TLS, AnyTLS, TrustTunnel, TUIC, Snell, Hysteria 2, SSH(Password authentication only), External Proxy Program(only for macOS), WireGuard(Surge to Surge))
-- [x] mihomo(Clash.Meta) Compatible (Direct, SS, SSR, VMess, Trojan, HTTP, SOCKS5, Snell, VLESS, WireGuard, Hysteria, Hysteria 2, TUIC, SSH, mieru, sudoku, AnyTLS, MASQUE, Tailscale, GOST Relay, Shadow QUIC, ZeroTier)
+- [x] Surge (Direct, SS, VMess, Trojan, HTTP, HTTPS, HTTP/2 CONNECT, SOCKS5, SOCKS5-TLS, AnyTLS, TrustTunnel, TUIC, Snell, Hysteria 2, MASQUE(Surge), SSH(Password authentication only), External Proxy Program(only for macOS), WireGuard(Surge to Surge))
+- [x] mihomo(Clash.Meta) Compatible (Direct, SS, SSR, VMess, Trojan, HTTP, SOCKS5, Snell, VLESS, WireGuard, Hysteria, Hysteria 2, TUIC, SSH, mieru, sudoku, AnyTLS, MASQUE, Tailscale, GOST Relay, Shadow QUIC, ZeroTier, OpenVPN)
 
 Deprecated(The frontend doesn't show it, but the backend still supports it, with the query parameter `target=Clash`):
 
