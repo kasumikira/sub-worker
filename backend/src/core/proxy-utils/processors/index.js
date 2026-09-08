@@ -12,6 +12,7 @@ import { produceArtifact } from '@/restful/sync';
 import { isMihomoConfigFile } from '@/utils/file-type';
 import { SETTINGS_KEY } from '@/constants';
 import YAML from '@/utils/yaml';
+import { getDynamicFunctionFactory } from '@/utils/dynamic-function-runtime';
 
 import env from '@/utils/env';
 import {
@@ -25,6 +26,11 @@ import {
 } from '@/utils/flow';
 
 export const RESPONSE_TRANSFORMER = 'Response Transformer';
+const QUICKJS_UNSUPPORTED_ERROR = '[QuickJS runtime]';
+
+function isQuickJSUnsupportedError(error) {
+    return `${error?.message ?? error}`.includes(QUICKJS_UNSUPPORTED_ERROR);
+}
 
 export function isResponseTransformerType(type) {
     return type === RESPONSE_TRANSFORMER;
@@ -1607,6 +1613,7 @@ export async function ApplyResponseTransformer(transformer, res) {
         const output_ = await transformer.func(output);
         if (output_) output = output_;
     } catch (err) {
+        if (isQuickJSUnsupportedError(err)) throw err;
         let funcErr = '';
         const funcErrMsg = `${err.message ?? err}`;
         if (!funcErrMsg.includes('$res is not defined')) {
@@ -1642,6 +1649,7 @@ async function ApplyFilter(filter, objs) {
     try {
         selected = await filter.func(objs);
     } catch (err) {
+        if (isQuickJSUnsupportedError(err)) throw err;
         let funcErr = '';
         let funcErrMsg = `${err.message ?? err}`;
         if (funcErrMsg.includes('$server is not defined')) {
@@ -1678,6 +1686,7 @@ async function ApplyOperator(operator, objs) {
         const output_ = await operator.func(output);
         if (output_) output = output_;
     } catch (err) {
+        if (isQuickJSUnsupportedError(err)) throw err;
         let funcErr = '';
         let funcErrMsg = `${err.message ?? err}`;
         if (
@@ -1759,6 +1768,27 @@ function createDynamicFunction(name, script, $arguments, $options) {
         getRmainingDays,
         normalizeFlowHeader,
     };
+    const dynamicFunctionFactory = getDynamicFunctionFactory();
+    if (dynamicFunctionFactory) {
+        return dynamicFunctionFactory({
+            name,
+            script,
+            bindings: {
+                $arguments,
+                $options,
+                $substore: $,
+                lodash,
+                ProxyUtils,
+                yaml: ProxyUtils.yaml,
+                b64d: ProxyUtils.Base64.decode,
+                b64e: ProxyUtils.Base64.encode,
+                DOMAIN_RESOLVERS,
+                scriptResourceCache,
+                flowUtils,
+                produceArtifact,
+            },
+        });
+    }
     if ($.env.isLoon) {
         return new Function(
             '$arguments',
