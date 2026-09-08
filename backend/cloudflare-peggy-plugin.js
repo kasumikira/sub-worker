@@ -48,8 +48,52 @@ module.exports = {
                     output: 'source',
                     format: 'bare',
                 });
+                // Keep module-level helpers and parse wrappers; only compile the
+                // Peggy call ahead of time so Workers never need dynamic code.
+                const edits = [];
+                let replacements = 0;
+                babel.traverse(ast, {
+                    ImportDeclaration({ node }) {
+                        if (node.source.value === 'peggy') {
+                            edits.push({
+                                start: node.start,
+                                end: node.end,
+                                text: '',
+                            });
+                        }
+                    },
+                    CallExpression({ node }) {
+                        if (
+                            node.callee.type === 'MemberExpression' &&
+                            !node.callee.computed &&
+                            node.callee.object.name === 'peggy' &&
+                            node.callee.property.name === 'generate' &&
+                            node.arguments.length === 1 &&
+                            node.arguments[0].name === 'grammars'
+                        ) {
+                            edits.push({
+                                start: node.start,
+                                end: node.end,
+                                text: `(${parser})`,
+                            });
+                            replacements += 1;
+                        }
+                    },
+                });
+                if (replacements !== 1) {
+                    throw new Error(
+                        `Expected one Peggy generation call in ${path}`,
+                    );
+                }
+                let contents = source;
+                for (const edit of edits.sort((a, b) => b.start - a.start)) {
+                    contents =
+                        contents.slice(0, edit.start) +
+                        edit.text +
+                        contents.slice(edit.end);
+                }
                 return {
-                    contents: `const parser = ${parser};\nexport default function getParser() { return parser; }`,
+                    contents,
                     loader: 'js',
                 };
             },
