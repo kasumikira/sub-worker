@@ -15,7 +15,16 @@ build({
         objectHasOwnPolyfill,
         'src/platforms/cloudflare/legacy-globals.js',
     ],
-    external: ['node:async_hooks'],
+    external: [
+        'node:async_hooks',
+        'child_process',
+        'dgram',
+        'fs',
+        'net',
+        'path',
+        'stream/promises',
+        'tls',
+    ],
     loader: { '.wasm': 'copy' },
     plugins: [cloudflareStaticPeggy],
     define: {
