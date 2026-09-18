@@ -2,6 +2,9 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "sub-store-cloudflare",
   "main": "dist/sub-store.cloudflare.js",
+  "build": {
+    "command": "pnpm bundle:cloudflare"
+  },
   "compatibility_date": "2026-08-31",
   "durable_objects": {
     "bindings": [{ "name": "SUB_STORE", "class_name": "SubStoreDO" }]
