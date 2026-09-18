@@ -1,7 +1,7 @@
 {
-  "$schema": "./backend/node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "sub-store-cloudflare",
-  "main": "backend/dist/sub-store.cloudflare.js",
+  "main": "dist/sub-store.cloudflare.js",
   "compatibility_date": "2026-08-31",
   "durable_objects": {
     "bindings": [{ "name": "SUB_STORE", "class_name": "SubStoreDO" }]
