@@ -1,3 +1,15 @@
+/**
+ * QuickJS runtime for the Cloudflare Worker target.
+ *
+ * Workers cannot evaluate JavaScript source at runtime, so the dynamic
+ * operator, filter, and response-transformer scripts stored in Sub-Store run
+ * inside an embedded QuickJS engine instead. Host values and functions are
+ * bridged into the guest; `registerQuickJSRuntime` hands the resulting runner
+ * to `@/utils/dynamic-function-runtime`.
+ *
+ * This is not a sandbox: the script is user-authored. The resource limits
+ * below only keep a runaway script from taking the Durable Object down.
+ */
 import quickJSVariant from '@jitl/quickjs-wasmfile-release-sync';
 import quickJSWasmModule from '@jitl/quickjs-wasmfile-release-sync/wasm';
 import {
@@ -6,55 +18,75 @@ import {
     shouldInterruptAfterDeadline,
 } from 'quickjs-emscripten-core';
 import { registerDynamicFunctionFactory } from '@/utils/dynamic-function-runtime';
-import { $persistentStore as workerPersistentStore } from './legacy-globals';
+import { $persistentStore } from './legacy-globals';
 
 const MEMORY_LIMIT_BYTES = 32 * 1024 * 1024;
 const STACK_LIMIT_BYTES = 512 * 1024;
 const EXECUTION_LIMIT_MS = 1000;
-const MAX_PENDING_JOB_PASSES = 1000;
-const UNSUPPORTED_PREFIX = '[QuickJS runtime]';
 
-const cloudflareVariant = newVariant(quickJSVariant, {
-    wasmModule: quickJSWasmModule,
-});
+let quickJSModulePromise;
 
-let quickJSRuntimePromise;
-
-function getQuickJSRuntime() {
-    if (!quickJSRuntimePromise) {
-        quickJSRuntimePromise = newQuickJSWASMModuleFromVariant(
-            cloudflareVariant,
-        )
-            .then((QuickJS) => {
-                const runtime = QuickJS.newRuntime();
-                runtime.setMemoryLimit(MEMORY_LIMIT_BYTES);
-                runtime.setMaxStackSize(STACK_LIMIT_BYTES);
-                return runtime;
-            })
-            .catch((error) => {
-                quickJSRuntimePromise = undefined;
-                throw error;
-            });
+// Compiling and instantiating the WASM module is shared. QuickJS runtimes are
+// not: each invocation gets its own runtime, job queue, interrupt handler, and
+// memory limit so nested dynamic scripts cannot interfere with their caller.
+function getQuickJSModule() {
+    if (!quickJSModulePromise) {
+        quickJSModulePromise = newQuickJSWASMModuleFromVariant(
+            newVariant(quickJSVariant, {
+                wasmModule: quickJSWasmModule,
+            }),
+        ).catch((error) => {
+            quickJSModulePromise = undefined;
+            throw error;
+        });
     }
-    return quickJSRuntimePromise;
+    return quickJSModulePromise;
 }
 
-function unsupported(feature, detail) {
-    const suffix = detail ? `: ${detail}` : '';
-    throw new Error(
-        `${UNSUPPORTED_PREFIX} ${feature} is not supported on Cloudflare${suffix}`,
+async function createQuickJSRuntime() {
+    const QuickJS = await getQuickJSModule();
+    const runtime = QuickJS.newRuntime();
+    runtime.setMemoryLimit(MEMORY_LIMIT_BYTES);
+    runtime.setMaxStackSize(STACK_LIMIT_BYTES);
+    return runtime;
+}
+
+// Restart the deadline for each synchronous segment, so wall time spent
+// waiting on host I/O outside the VM does not count against the CPU budget.
+function refreshDeadline(vm) {
+    vm.runtime.setInterruptHandler(
+        shouldInterruptAfterDeadline(Date.now() + EXECUTION_LIMIT_MS),
     );
-}
-
-function unsupportedFunction(feature, detail) {
-    return () => unsupported(feature, detail);
 }
 
 function isPromiseLike(value) {
     return value && typeof value.then === 'function';
 }
 
-function toQuickJSHandle(vm, value, seen = new Set(), path = 'value') {
+function formatQuickJSError(error) {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'string') return error;
+    if (error && typeof error === 'object') {
+        if (error.message && error.stack) {
+            return `${error.message}\n${error.stack}`;
+        }
+        return error.message || error.stack || JSON.stringify(error);
+    }
+    return String(error);
+}
+
+/* ------------------------- host value → guest value ------------------------- */
+
+// Data is copied by value and functions become callable bridges. A function
+// that is a member of an object is called with that object as its receiver, so
+// `ProxyUtils.yaml.safeDump()` keeps the right `this` inside the guest.
+function toGuestValue(
+    vm,
+    value,
+    seen = new Set(),
+    path = 'value',
+    onFatal = undefined,
+) {
     if (typeof value === 'undefined') return vm.undefined;
     if (value === null) return vm.null;
     if (typeof value === 'boolean') return value ? vm.true : vm.false;
@@ -62,13 +94,15 @@ function toQuickJSHandle(vm, value, seen = new Set(), path = 'value') {
     if (typeof value === 'string') return vm.newString(value);
     if (typeof value === 'bigint') return vm.newBigInt(value);
     if (typeof value === 'function') {
-        unsupported(`function-valued data at ${path}`);
+        return createHostFunction(vm, value, undefined, path, onFatal);
     }
     if (typeof value !== 'object') {
-        unsupported(`${typeof value} data at ${path}`);
+        throw new Error(`Cannot copy ${typeof value} into QuickJS`);
     }
     if (seen.has(value)) {
-        unsupported(`cyclic data at ${path}`);
+        throw new Error(
+            `Cannot copy a circular host value (${path}) into QuickJS`,
+        );
     }
 
     seen.add(value);
@@ -84,15 +118,33 @@ function toQuickJSHandle(vm, value, seen = new Set(), path = 'value') {
             );
         }
 
-        const handle = Array.isArray(value) ? vm.newArray() : vm.newObject();
+        const isArray = Array.isArray(value);
+        const prototype = Object.getPrototypeOf(value);
+        if (
+            !isArray &&
+            prototype !== Object.prototype &&
+            prototype !== null
+        ) {
+            const typeName = value.constructor?.name || 'object';
+            throw new Error(
+                `Cannot copy host ${typeName} value (${path}) into QuickJS`,
+            );
+        }
+
+        const handle = isArray ? vm.newArray() : vm.newObject();
         try {
             Object.entries(value).forEach(([key, child]) => {
-                const childHandle = toQuickJSHandle(
-                    vm,
-                    child,
-                    seen,
-                    `${path}.${key}`,
-                );
+                const childPath = `${path}.${key}`;
+                const childHandle =
+                    typeof child === 'function'
+                        ? createHostFunction(
+                              vm,
+                              child,
+                              value,
+                              childPath,
+                              onFatal,
+                          )
+                        : toGuestValue(vm, child, seen, childPath, onFatal);
                 try {
                     vm.setProp(handle, key, childHandle);
                 } finally {
@@ -109,68 +161,210 @@ function toQuickJSHandle(vm, value, seen = new Set(), path = 'value') {
     }
 }
 
-function dumpArgument(vm, handle, feature) {
+function createHostFunction(vm, fn, receiver, name, onFatal) {
+    return vm.newFunction(name, (...argHandles) => {
+        const callbackHandles = [];
+        try {
+            const result = fn.apply(
+                receiver,
+                argHandles.map((argHandle) =>
+                    dumpArgument(vm, argHandle, callbackHandles, onFatal),
+                ),
+            );
+            return isPromiseLike(result)
+                ? bridgeHostPromise(vm, result, name, onFatal)
+                : toGuestValue(vm, result, new Set(), name, onFatal);
+        } finally {
+            callbackHandles.forEach((handle) => handle.dispose());
+        }
+    });
+}
+
+// Guest callbacks can be used by synchronous host APIs such as lodash. The
+// duplicated handle stays alive for the duration of the host call. Retaining
+// the callback and invoking it asynchronously is intentionally unsupported.
+function createGuestCallback(vm, handle, callbackHandles, onFatal) {
+    const callbackHandle = handle.dup();
+    callbackHandles.push(callbackHandle);
+    return (...args) => {
+        const argumentHandles = args.map((arg, index) =>
+            toGuestValue(
+                vm,
+                arg,
+                new Set(),
+                `callback argument ${index}`,
+                onFatal,
+            ),
+        );
+        try {
+            const result = vm.callFunction(
+                callbackHandle,
+                vm.undefined,
+                argumentHandles,
+            );
+            const valueHandle = unwrapQuickJSResult(vm, result);
+            try {
+                return vm.dump(valueHandle);
+            } finally {
+                valueHandle.dispose();
+            }
+        } finally {
+            argumentHandles.forEach((argumentHandle) =>
+                argumentHandle.dispose(),
+            );
+        }
+    };
+}
+
+function dumpArgument(vm, handle, callbackHandles, onFatal) {
     const type = vm.typeof(handle);
     if (type === 'function') {
-        unsupported(
-            `${feature} callback arguments`,
-            'use native JavaScript array methods inside the script instead',
-        );
+        return createGuestCallback(vm, handle, callbackHandles, onFatal);
     }
-    if (type === 'symbol') unsupported(`${feature} symbol arguments`);
+    if (type === 'symbol') {
+        throw new Error('Cannot pass a symbol from the script to a host API');
+    }
     return vm.dump(handle);
 }
 
-function createHostFunction(vm, name, fn, receiver) {
-    return vm.newFunction(
-        name.split('.').pop() || 'hostFunction',
-        (...args) => {
-            if (fn.constructor?.name === 'AsyncFunction') {
-                unsupported(`${name} asynchronous host API`);
+// A host function that returns a promise is represented in the guest by a
+// deferred promise, resolved or rejected once the host side settles.
+function bridgeHostPromise(vm, promise, name, onFatal) {
+    const deferred = vm.newPromise();
+
+    const settle = (method, value) => {
+        if (!vm.alive) {
+            deferred.dispose();
+            return;
+        }
+        try {
+            const handle =
+                method === 'resolve'
+                    ? toGuestValue(vm, value, new Set(), name, onFatal)
+                    : vm.newError(formatQuickJSError(value));
+            try {
+                deferred[method](handle);
+            } finally {
+                handle.dispose();
             }
-            const result = fn.apply(
-                receiver,
-                args.map((arg) => dumpArgument(vm, arg, name)),
-            );
-            if (isPromiseLike(result)) {
-                unsupported(`${name} asynchronous host API`);
+        } catch (error) {
+            // The result may not be representable as a guest value (Map,
+            // cycles, ...); surface that as a rejection for the script.
+            const errorHandle = vm.newError(formatQuickJSError(error));
+            try {
+                deferred.reject(errorHandle);
+            } finally {
+                errorHandle.dispose();
             }
-            return toQuickJSHandle(vm, result, new Set(), `${name} result`);
-        },
+        }
+    };
+
+    Promise.resolve(promise).then(
+        (value) => settle('resolve', value),
+        (error) => settle('reject', error),
     );
+
+    // Settling only queues a guest job; pump the queue so the script's `await`
+    // can continue.
+    void deferred.settled.then(() => {
+        if (!vm.alive) return;
+        refreshDeadline(vm);
+        const jobs = vm.runtime.executePendingJobs();
+        if (jobs.error) {
+            const error = vm.dump(jobs.error);
+            jobs.error.dispose();
+            const message = formatQuickJSError(error);
+            if (onFatal) {
+                onFatal(new Error(message));
+            } else {
+                console.error('[Cloudflare] QuickJS job failed', message);
+            }
+        }
+    });
+
+    return deferred.handle;
 }
 
-function createHostNamespace(vm, value, name, seen = new Set()) {
-    if (typeof value === 'function') {
-        return createHostFunction(vm, name, value, undefined);
-    }
-    if (!value || typeof value !== 'object') {
-        return toQuickJSHandle(vm, value, new Set(), name);
-    }
-    if (seen.has(value)) unsupported(`cyclic host namespace ${name}`);
+/* ------------------------- globals visible to scripts ----------------------- */
 
-    seen.add(value);
-    const handle = vm.newObject();
-    try {
-        Object.keys(value).forEach((key) => {
-            const child = value[key];
-            const childHandle =
-                typeof child === 'function'
-                    ? createHostFunction(vm, `${name}.${key}`, child, value)
-                    : createHostNamespace(vm, child, `${name}.${key}`, seen);
-            try {
-                vm.setProp(handle, key, childHandle);
-            } finally {
-                childHandle.dispose();
-            }
+// Binary data cannot be copied into the guest as-is, so Buffer values cross
+// the bridge as strings. Enough for the usual
+// `Buffer.from(x, 'base64').toString('utf8')` compatibility patterns.
+function createBufferBridge(BufferImpl) {
+    const wrap = (buffer) => {
+        const value = {
+            __subStoreBuffer: true,
+            length: buffer.length,
+            toString: (encoding = 'utf8', start, end) =>
+                buffer.toString(encoding, start, end),
+            slice: (start, end) => wrap(buffer.slice(start, end)),
+            subarray: (start, end) => wrap(buffer.subarray(start, end)),
+            toJSON: () => ({ type: 'Buffer', data: Array.from(buffer) }),
+        };
+        buffer.forEach((byte, index) => {
+            value[index] = byte;
         });
-        return handle;
-    } catch (error) {
-        handle.dispose();
-        throw error;
-    } finally {
-        seen.delete(value);
-    }
+        return value;
+    };
+
+    return {
+        from(value, encoding = 'utf8') {
+            return wrap(BufferImpl.from(value, encoding));
+        },
+        byteLength(value, encoding = 'utf8') {
+            return BufferImpl.byteLength(value, encoding);
+        },
+    };
+}
+
+function createBindings(bindings) {
+    const $substore = bindings.$substore;
+    const bind = (fn) => fn.bind($substore);
+    const scriptResourceCache = bindings.scriptResourceCache;
+    const Buffer = createBufferBridge(bindings.ProxyUtils.Buffer);
+
+    return {
+        ...bindings,
+        // `$substore` is the app instance, which carries the whole database
+        // (`$.root`) and `$.cache`; copy only the members scripts use.
+        $substore: {
+            env: $substore.env,
+            read: bind($substore.read),
+            write: bind($substore.write),
+            delete: bind($substore.delete),
+            log: bind($substore.log),
+            info: bind($substore.info),
+            warn: bind($substore.warn),
+            error: bind($substore.error),
+            notify: bind($substore.notify),
+        },
+        ProxyUtils: {
+            ...bindings.ProxyUtils,
+            Buffer,
+        },
+        Buffer,
+        atob: bindings.b64d,
+        btoa: bindings.b64e,
+        // Methods of a class instance live on its prototype and are not
+        // enumerable, so bind them explicitly.
+        scriptResourceCache: {
+            get: scriptResourceCache.get.bind(scriptResourceCache),
+            gettime: scriptResourceCache.gettime.bind(scriptResourceCache),
+            set: scriptResourceCache.set.bind(scriptResourceCache),
+            revokeAll: scriptResourceCache.revokeAll.bind(scriptResourceCache),
+        },
+        $persistentStore,
+        $notification: {
+            post: bind($substore.notify),
+        },
+        console: {
+            log: bind($substore.log),
+            info: bind($substore.info),
+            warn: bind($substore.warn),
+            error: bind($substore.error),
+            debug: bind($substore.log),
+        },
+    };
 }
 
 function setGlobal(vm, name, handle) {
@@ -181,244 +375,7 @@ function setGlobal(vm, name, handle) {
     }
 }
 
-function createUnsupportedNamespace(namespace, methods) {
-    return Object.fromEntries(
-        methods.map((method) => [
-            method,
-            unsupportedFunction(`${namespace}.${method}`),
-        ]),
-    );
-}
-
-function createSafeBindings(bindings) {
-    const {
-        $arguments,
-        $options,
-        $substore,
-        lodash,
-        ProxyUtils,
-        yaml,
-        b64d,
-        b64e,
-        DOMAIN_RESOLVERS,
-        scriptResourceCache,
-        flowUtils,
-    } = bindings;
-
-    const safeSubstore = {
-        env: $substore.env,
-        read: $substore.read.bind($substore),
-        write: $substore.write.bind($substore),
-        delete: $substore.delete.bind($substore),
-        log: $substore.log.bind($substore),
-        info: $substore.info.bind($substore),
-        warn: $substore.warn.bind($substore),
-        error: $substore.error.bind($substore),
-        notify: $substore.notify.bind($substore),
-        http: createUnsupportedNamespace('$substore.http', [
-            'request',
-            'get',
-            'post',
-            'put',
-            'patch',
-            'delete',
-            'head',
-            'options',
-        ]),
-    };
-    const safeLodash = Object.fromEntries(
-        Object.entries(lodash).filter(([, value]) => {
-            return (
-                value === null ||
-                ['function', 'string', 'number', 'boolean'].includes(
-                    typeof value,
-                )
-            );
-        }),
-    );
-    const safeProxyUtils = {
-        parse: ProxyUtils.parse,
-        produce: ProxyUtils.produce,
-        age: ProxyUtils.age,
-        getRandomPort: ProxyUtils.getRandomPort,
-        isIPv4: ProxyUtils.isIPv4,
-        isIPv6: ProxyUtils.isIPv6,
-        isIP: ProxyUtils.isIP,
-        yaml: ProxyUtils.yaml,
-        getFlag: ProxyUtils.getFlag,
-        removeFlag: ProxyUtils.removeFlag,
-        getISO: ProxyUtils.getISO,
-        Base64: ProxyUtils.Base64,
-        JSON5: ProxyUtils.JSON5,
-        hex_md5: ProxyUtils.hex_md5,
-        process: unsupportedFunction('ProxyUtils.process'),
-        processResponse: unsupportedFunction('ProxyUtils.processResponse'),
-        download: unsupportedFunction('ProxyUtils.download'),
-        downloadFile: unsupportedFunction('ProxyUtils.downloadFile'),
-        doh: unsupportedFunction('ProxyUtils.doh'),
-        Gist: unsupportedFunction('ProxyUtils.Gist'),
-        MMDB: unsupportedFunction('ProxyUtils.MMDB'),
-        ipAddress: unsupportedFunction('ProxyUtils.ipAddress'),
-        Buffer: unsupportedFunction('ProxyUtils.Buffer'),
-    };
-    const safeDomainResolvers = Object.fromEntries(
-        Object.keys(DOMAIN_RESOLVERS).map((name) => [
-            name,
-            unsupportedFunction(`DOMAIN_RESOLVERS.${name}`),
-        ]),
-    );
-    const safeScriptResourceCache = {
-        get: scriptResourceCache.get.bind(scriptResourceCache),
-        gettime: scriptResourceCache.gettime.bind(scriptResourceCache),
-        set: scriptResourceCache.set.bind(scriptResourceCache),
-        revokeAll: scriptResourceCache.revokeAll.bind(scriptResourceCache),
-    };
-
-    return {
-        $arguments,
-        $options,
-        $substore: safeSubstore,
-        lodash: safeLodash,
-        ProxyUtils: safeProxyUtils,
-        yaml,
-        b64d,
-        b64e,
-        DOMAIN_RESOLVERS: safeDomainResolvers,
-        scriptResourceCache: safeScriptResourceCache,
-        flowUtils,
-        produceArtifact: unsupportedFunction('produceArtifact'),
-        require: unsupportedFunction('require'),
-    };
-}
-
-function installConsole(vm, $substore) {
-    const consoleApi = {
-        log: $substore.log.bind($substore),
-        info: $substore.info.bind($substore),
-        warn: $substore.warn.bind($substore),
-        error: $substore.error.bind($substore),
-        debug: $substore.log.bind($substore),
-    };
-    setGlobal(vm, 'console', createHostNamespace(vm, consoleApi, 'console'));
-}
-
-function installUnsupportedGlobals(vm, $substore) {
-    const functions = [
-        'fetch',
-        'setTimeout',
-        'clearTimeout',
-        'setInterval',
-        'clearInterval',
-        'queueMicrotask',
-    ];
-    functions.forEach((name) => {
-        setGlobal(
-            vm,
-            name,
-            createHostFunction(vm, name, unsupportedFunction(name)),
-        );
-    });
-    setGlobal(
-        vm,
-        '$httpClient',
-        createHostNamespace(
-            vm,
-            createUnsupportedNamespace('$httpClient', [
-                'get',
-                'post',
-                'put',
-                'patch',
-                'delete',
-            ]),
-            '$httpClient',
-        ),
-    );
-    setGlobal(
-        vm,
-        '$persistentStore',
-        createHostNamespace(
-            vm,
-            workerPersistentStore,
-            '$persistentStore',
-        ),
-    );
-    setGlobal(
-        vm,
-        '$notification',
-        createHostNamespace(
-            vm,
-            {
-                post: $substore.notify.bind($substore),
-            },
-            '$notification',
-        ),
-    );
-    const result = vm.evalCode(`
-        const __subStoreUnsupportedGlobal = (feature) => new Proxy(function () {}, {
-            get() {
-                throw new Error('${UNSUPPORTED_PREFIX} ' + feature + ' is not supported on Cloudflare');
-            },
-            apply() {
-                throw new Error('${UNSUPPORTED_PREFIX} ' + feature + ' is not supported on Cloudflare');
-            },
-            construct() {
-                throw new Error('${UNSUPPORTED_PREFIX} ' + feature + ' is not supported on Cloudflare');
-            }
-        });
-        globalThis.process = __subStoreUnsupportedGlobal('process');
-        globalThis.global = __subStoreUnsupportedGlobal('global');
-        globalThis.module = __subStoreUnsupportedGlobal('module');
-        globalThis.exports = __subStoreUnsupportedGlobal('exports');
-        globalThis.WebSocket = __subStoreUnsupportedGlobal('WebSocket');
-        globalThis.XMLHttpRequest = __subStoreUnsupportedGlobal('XMLHttpRequest');
-    `);
-    if (result.error) {
-        const error = vm.dump(result.error);
-        result.error.dispose();
-        throw new Error(formatQuickJSError(error));
-    }
-    result.value.dispose();
-}
-
-function installBufferShim(vm) {
-    const result = vm.evalCode(`
-        globalThis.Buffer = Object.freeze({
-            from(value, encoding = 'utf8') {
-                const normalized = String(encoding).toLowerCase();
-                const text = normalized === 'base64' ? b64d(String(value)) : String(value);
-                return Object.freeze({
-                    toString(outputEncoding = 'utf8') {
-                        const output = String(outputEncoding).toLowerCase();
-                        if (output === 'base64') return b64e(text);
-                        if (output === 'utf8' || output === 'utf-8') return text;
-                        throw new Error('${UNSUPPORTED_PREFIX} Buffer encoding "' + output + '" is not supported on Cloudflare');
-                    }
-                });
-            }
-        });
-        ProxyUtils.Buffer = Buffer;
-        globalThis.atob = b64d;
-        globalThis.btoa = b64e;
-    `);
-    if (result.error) {
-        const error = vm.dump(result.error);
-        result.error.dispose();
-        throw new Error(formatQuickJSError(error));
-    }
-    result.value.dispose();
-}
-
-function formatQuickJSError(error) {
-    if (error instanceof Error) return error.message;
-    if (typeof error === 'string') return error;
-    if (error && typeof error === 'object') {
-        if (error.message && error.stack) {
-            return `${error.message}\n${error.stack}`;
-        }
-        return error.message || error.stack || JSON.stringify(error);
-    }
-    return String(error);
-}
+/* --------------------------------- entry point ------------------------------ */
 
 function unwrapQuickJSResult(vm, result) {
     if (result.error) {
@@ -430,29 +387,56 @@ function unwrapQuickJSResult(vm, result) {
 }
 
 async function executeQuickJSScript({ name, script, bindings }, args) {
-    const runtime = await getQuickJSRuntime();
-    runtime.setInterruptHandler(
-        shouldInterruptAfterDeadline(Date.now() + EXECUTION_LIMIT_MS),
-    );
+    const runtime = await createQuickJSRuntime();
     const vm = runtime.newContext();
+    let rejectFatal;
+    const fatalError = new Promise((resolve, reject) => {
+        rejectFatal = reject;
+    });
+    let active = true;
+    const onFatal = (error) => {
+        if (active) rejectFatal(error);
+    };
 
     try {
-        const safeBindings = createSafeBindings(bindings);
-        Object.entries(safeBindings).forEach(([bindingName, value]) => {
-            setGlobal(
-                vm,
-                bindingName,
-                createHostNamespace(vm, value, bindingName),
-            );
-        });
+        refreshDeadline(vm);
+        Object.entries(createBindings(bindings)).forEach(
+            ([bindingName, value]) => {
+                setGlobal(
+                    vm,
+                    bindingName,
+                    toGuestValue(
+                        vm,
+                        value,
+                        new Set(),
+                        bindingName,
+                        onFatal,
+                    ),
+                );
+            },
+        );
         setGlobal(
             vm,
             '__subStoreInvocationArguments',
-            toQuickJSHandle(vm, args, new Set(), 'invocation arguments'),
+            toGuestValue(
+                vm,
+                args,
+                new Set(),
+                'invocation arguments',
+                onFatal,
+            ),
         );
-        installConsole(vm, bindings.$substore);
-        installUnsupportedGlobals(vm, bindings.$substore);
-        installBufferShim(vm);
+
+        // Keep the identity check inside QuickJS. vm.dump intentionally copies
+        // values and may omit the non-index metadata used to brand a Buffer.
+        const bufferSetup = vm.evalCode(`
+            Buffer.isBuffer = (value) =>
+                value !== null &&
+                typeof value === 'object' &&
+                value.__subStoreBuffer === true;
+            ProxyUtils.Buffer = Buffer;
+        `);
+        unwrapQuickJSResult(vm, bufferSetup).dispose();
 
         const evaluation = vm.evalCode(`
             Promise.resolve((() => {
@@ -464,42 +448,43 @@ async function executeQuickJSScript({ name, script, bindings }, args) {
             })())
         `);
         const promiseHandle = unwrapQuickJSResult(vm, evaluation);
+
         try {
-            let state = vm.getPromiseState(promiseHandle);
-            let passes = 0;
-            while (
-                state.type === 'pending' &&
-                passes < MAX_PENDING_JOB_PASSES
-            ) {
-                const jobs = runtime.executePendingJobs();
-                if (jobs.error) {
-                    const error = vm.dump(jobs.error);
-                    jobs.error.dispose();
-                    throw new Error(formatQuickJSError(error));
-                }
-                passes += 1;
-                state = vm.getPromiseState(promiseHandle);
-                if (state.type === 'pending' && jobs.value === 0) break;
-            }
-            if (state.type === 'pending') {
-                unsupported(
-                    'unresolved asynchronous script operations',
-                    'host I/O and timers are unavailable',
-                );
-            }
-            if (state.type === 'rejected') {
-                const error = vm.dump(state.error);
-                state.error.dispose();
+            // `resolvePromise` only attaches `.then(resolve, reject)` to the
+            // guest promise, and those callbacks run when the job queue is
+            // pumped below, so this has to happen first.
+            const pending = vm.resolvePromise(promiseHandle);
+            refreshDeadline(vm);
+            const jobs = runtime.executePendingJobs();
+            if (jobs.error) {
+                const error = vm.dump(jobs.error);
+                jobs.error.dispose();
                 throw new Error(formatQuickJSError(error));
             }
-            const output = vm.dump(state.value);
-            state.value.dispose();
+
+            // While the script waits on host I/O (`await produceArtifact(...)`)
+            // this stays pending; the deferred bridges keep pumping the job
+            // queue as they settle.
+            // A failure returned by executePendingJobs is not guaranteed to
+            // settle the promise observed by resolvePromise. Race it against
+            // an invocation-level error channel so an async continuation can
+            // never leave this call waiting forever.
+            const resolved = await Promise.race([pending, fatalError]);
+            if (resolved.error) {
+                const error = vm.dump(resolved.error);
+                resolved.error.dispose();
+                throw new Error(formatQuickJSError(error));
+            }
+            const output = vm.dump(resolved.value);
+            resolved.value.dispose();
             return output;
         } finally {
             promiseHandle.dispose();
         }
     } finally {
+        active = false;
         vm.dispose();
+        runtime.dispose();
     }
 }
 
