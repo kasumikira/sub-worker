@@ -9,6 +9,7 @@ import { expect } from 'chai';
 import { describe, it, before } from 'mocha';
 import { build } from 'esbuild';
 import { Buffer as NodeBuffer } from 'buffer';
+import lodash from 'lodash';
 import path from 'path';
 import vm from 'vm';
 import { createRequire } from 'module';
@@ -309,6 +310,21 @@ describe('Cloudflare QuickJS runtime', function () {
             bindings,
         );
         expect(output).to.deep.equal([20, 30]);
+    });
+
+    it('exposes methods from the real callable lodash export', async function () {
+        const { bindings } = createBindings({ lodash });
+        const output = await run(
+            'operator',
+            `function operator() {
+                return lodash.map(
+                    lodash.filter([{ n: 1 }, { n: 2 }], (item) => item.n > 1),
+                    (item) => item.n * 10,
+                );
+            }`,
+            bindings,
+        );
+        expect(output).to.deep.equal([20]);
     });
 
     it('hands arrays to the script as arrays', async function () {
