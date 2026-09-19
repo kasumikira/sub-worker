@@ -42,46 +42,55 @@ Not implemented or intentionally unsupported:
 - Node.js-only facilities such as local filesystem access, child processes,
   local MMDB files, Node proxy agents, and Node environment-based frontend
   hosting.
-- Native dynamic JavaScript evaluation by the Workers runtime. Dynamic scripts
-  run only inside the restricted QuickJS sandbox described below.
+- Native dynamic JavaScript evaluation by the Workers runtime, which does not
+  implement it. Dynamic scripts run inside the embedded QuickJS engine
+  described below.
 - Push notifications. Notifications are written to Worker logs only.
 - Values larger than 1,900,000 bytes in a single storage entry. Large files or
   unusually large top-level datasets may exceed this limit.
 
 ### QuickJS compatibility
 
-The QuickJS integration is intended for common Sub-Store operators, filters,
-and response transformers. It is not a complete Node.js, Surge, or Loon
-runtime.
+Workers cannot evaluate JavaScript source at runtime, so dynamic operators,
+filters, and response transformers are executed by an embedded QuickJS engine.
+The script is user-authored and runs against the same host API Sub-Store
+already exposes to it elsewhere. This deployment is intended for personal use:
+dynamic scripts are trusted, and QuickJS is used only as an execution engine,
+not as a security sandbox or permission boundary. The limits described below
+protect runtime availability rather than defending against malicious scripts.
 
 Available inside QuickJS:
 
-- Standard ECMAScript supported by QuickJS and Promise jobs that can settle
-  without timers or external I/O.
-- `$arguments`, `$options`, `console`, `$substore` storage/logging methods,
-  `$persistentStore`, and `$notification.post`. Notifications log messages
-  instead of sending a push notification.
-- Synchronous lodash calls, selected synchronous `ProxyUtils` helpers, YAML,
-  JSON5, Base64, MD5, flow helpers, and the script resource cache.
-- `atob`, `btoa`, and a small `Buffer.from(...).toString(...)` compatibility
-  shim for UTF-8 and Base64.
-- A 32 MiB QuickJS memory limit, 512 KiB stack limit, and one-second execution
-  deadline per invocation.
+- Everything QuickJS implements itself, including promises. Host functions
+  that return a promise (`produceArtifact`, `download`, DNS resolvers, and so
+  on) can be awaited directly.
+- `$arguments`, `$options`, `console`, `$substore` (`env`, `read`, `write`,
+  `delete`, and the logging methods), `$persistentStore`, and
+  `$notification.post`. Notifications are written to the Worker log instead of
+  being pushed.
+- `produceArtifact`, lodash, `ProxyUtils`, `yaml`, `b64d`, `b64e`,
+  `DOMAIN_RESOLVERS`, `scriptResourceCache`, `flowUtils`, `Buffer`, `atob`,
+  and `btoa`. Guest callbacks can be passed to synchronous host APIs, so calls
+  such as `lodash.map(values, value => value.name)` work. A host API must not
+  retain such a callback or invoke it asynchronously.
+- Plain objects and arrays cross the host boundary by value. Dates currently
+  cross as ISO strings, typed-array views cross as `ArrayBuffer`, and unsupported
+  object types such as `Map`, `Set`, `RegExp`, `Error`, or custom class instances
+  fail explicitly instead of being silently converted to empty objects.
+- Each invocation uses an isolated QuickJS runtime with its own 32 MiB memory
+  limit, 512 KiB stack limit, job queue, and interrupt handler. The CPU
+  deadline is one second per execution segment; waiting on host I/O does not
+  consume it. These guards only keep a runaway script from taking the Durable
+  Object down with it.
 
-Unavailable inside QuickJS and reported with an explicit
-`[QuickJS runtime]` error:
+Unavailable inside QuickJS:
 
-- `fetch`, timers, `queueMicrotask`, WebSocket, and XMLHttpRequest.
-- `$httpClient` and `$substore.http`; the Worker backend itself can perform
-  remote HTTP requests, but sandboxed dynamic scripts cannot.
+- `fetch`, timers, `queueMicrotask`, WebSocket, XMLHttpRequest, `$httpClient`,
+  and `$substore.http`. Remote requests have to go through the Worker backend;
+  referencing them from a script fails with a plain `is not defined` error.
 - `require`, `process`, `global`, `module`, and `exports`.
-- DNS resolver providers, `produceArtifact`, and network/file-dependent
-  `ProxyUtils` functions such as `process`, `processResponse`, `download`,
-  `downloadFile`, `doh`, `Gist`, `MMDB`, and `ipAddress`.
-- Asynchronous host functions and host API calls that receive JavaScript
-  callback functions. Use native array methods inside the script when a
-  callback is needed.
-- Buffer encodings other than UTF-8 and Base64.
+- Host APIs that retain a script callback or invoke it asynchronously. Callback
+  bridging currently covers synchronous calls only.
 
 ### Build and deploy
 

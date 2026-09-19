@@ -26,11 +26,6 @@ import {
 } from '@/utils/flow';
 
 export const RESPONSE_TRANSFORMER = 'Response Transformer';
-const QUICKJS_UNSUPPORTED_ERROR = '[QuickJS runtime]';
-
-function isQuickJSUnsupportedError(error) {
-    return `${error?.message ?? error}`.includes(QUICKJS_UNSUPPORTED_ERROR);
-}
 
 export function isResponseTransformerType(type) {
     return type === RESPONSE_TRANSFORMER;
@@ -1613,7 +1608,6 @@ export async function ApplyResponseTransformer(transformer, res) {
         const output_ = await transformer.func(output);
         if (output_) output = output_;
     } catch (err) {
-        if (isQuickJSUnsupportedError(err)) throw err;
         let funcErr = '';
         const funcErrMsg = `${err.message ?? err}`;
         if (!funcErrMsg.includes('$res is not defined')) {
@@ -1649,7 +1643,6 @@ async function ApplyFilter(filter, objs) {
     try {
         selected = await filter.func(objs);
     } catch (err) {
-        if (isQuickJSUnsupportedError(err)) throw err;
         let funcErr = '';
         let funcErrMsg = `${err.message ?? err}`;
         if (funcErrMsg.includes('$server is not defined')) {
@@ -1686,7 +1679,6 @@ async function ApplyOperator(operator, objs) {
         const output_ = await operator.func(output);
         if (output_) output = output_;
     } catch (err) {
-        if (isQuickJSUnsupportedError(err)) throw err;
         let funcErr = '';
         let funcErrMsg = `${err.message ?? err}`;
         if (
