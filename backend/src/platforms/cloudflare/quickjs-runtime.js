@@ -322,9 +322,25 @@ function createBindings(bindings) {
     const bind = (fn) => fn.bind($substore);
     const scriptResourceCache = bindings.scriptResourceCache;
     const Buffer = createBufferBridge(bindings.ProxyUtils.Buffer);
+    // The lodash export is itself a function. Treating it as a host function
+    // hides its methods (`lodash.map`, `lodash.filter`, ...), while copying the
+    // entire object reaches the circular `templateSettings.imports._` member.
+    // Dynamic scripts use lodash as a method namespace, so expose its callable
+    // and primitive members without the circular configuration objects.
+    const lodash = Object.fromEntries(
+        Object.entries(bindings.lodash).filter(([, value]) => {
+            return (
+                value === null ||
+                ['function', 'string', 'number', 'boolean'].includes(
+                    typeof value,
+                )
+            );
+        }),
+    );
 
     return {
         ...bindings,
+        lodash,
         // `$substore` is the app instance, which carries the whole database
         // (`$.root`) and `$.cache`; copy only the members scripts use.
         $substore: {
