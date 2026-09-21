@@ -1,0 +1,69 @@
+name: Sync upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          ref: dev
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/sub-store-org/Sub-Store.git
+          git fetch --no-tags upstream master
+
+      - name: Push upstream branch
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin dev
+
+          if git diff --quiet origin/dev...upstream/master; then
+            echo "dev already contains upstream/master"
+            exit 0
+          fi
+
+          git push --force origin \
+            refs/remotes/upstream/master:refs/heads/sync/upstream-master
+
+      - name: Create or update pull request
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          head="sync/upstream-master"
+
+          number="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --base dev \
+            --head "$head" \
+            --json number \
+            --jq '.[0].number')"
+
+          if [[ -z "$number" ]]; then
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base dev \
+              --head "$head" \
+              --title "chore: sync upstream" \
+              --body "Automatically generated from sub-store-org/Sub-Store:master."
+          else
+            echo "Updating existing PR #$number"
+          fi
