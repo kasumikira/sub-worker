@@ -738,7 +738,7 @@ export function HTTP(defaultOptions = { baseURL: '' }) {
                 },
             );
 
-            if (timeout && !isEgern) {
+            if (timeout) {
                 timeoutid = setTimeout(() => {
                     if (settled) {
                         return;
