@@ -30,6 +30,7 @@ jobs:
           git fetch --no-tags upstream master
 
       - name: Push upstream branch
+        id: push_upstream
         run: |
           set -euo pipefail
           git fetch --no-tags origin dev
@@ -41,8 +42,10 @@ jobs:
 
           git push --force origin \
             refs/remotes/upstream/master:refs/heads/sync/upstream-master
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       - name: Create or update pull request
+        if: steps.push_upstream.outputs.pushed == 'true'
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
         run: |
