@@ -864,7 +864,9 @@ describe('Proxy text producers', function () {
             },
         ]);
 
-        expect(output.match(/tls-profile=chrome147(?=,|$)/gm)).to.have.length(9);
+        expect(output.match(/tls-profile=chrome147(?=,|$)/gm)).to.have.length(
+            9,
+        );
         expect(output.match(/alpn="http\/1\.1,h2,h3"/g)).to.have.length(9);
     });
 
@@ -906,7 +908,9 @@ describe('Proxy text producers', function () {
         expect(output).to.include('tls-profile=ios18');
         expect(output).to.include('tls-profile=default');
         expect(output).to.match(/tls-profile=chrome(?=,|$)/m);
-        expect(output.match(/tls-profile=chrome147(?=,|$)/gm)).to.have.length(2);
+        expect(output.match(/tls-profile=chrome147(?=,|$)/gm)).to.have.length(
+            2,
+        );
         expect(output).to.include('tls-profile=ios26');
         expect(output.match(/tls-profile=/g)).to.have.length(6);
     });
@@ -1079,8 +1083,10 @@ describe('Proxy text producers', function () {
                             ? [`,udp-relay=${udp}`]
                             : [];
 
-                    expect(output.match(/,udp-relay=[^,\n]+/g) || [], output)
-                        .to.deep.equal(expected);
+                    expect(
+                        output.match(/,udp-relay=[^,\n]+/g) || [],
+                        output,
+                    ).to.deep.equal(expected);
                 }
             }
         }
@@ -2474,7 +2480,39 @@ describe('Proxy text producers', function () {
         expect(output).to.equal(
             `ss://${Base64.encode(
                 'aes-128-gcm:secret',
-            )}@ss.example.com:443/?plugin=${plugin}#SS%20V2ray%20Flags`,
+            )}@ss.example.com:443/?plugin=${plugin}&udp=0#SS%20V2ray%20Flags`,
+        );
+    });
+
+    it('serializes explicit shadowsocks UDP flags as numeric URI values', function () {
+        const enabled = produceExternal('URI', {
+            type: 'ss',
+            name: 'SS UDP On',
+            server: 'ss.example.com',
+            port: 8388,
+            cipher: 'aes-128-gcm',
+            password: 'secret',
+            udp: true,
+        });
+        const disabled = produceExternal('URI', {
+            type: 'ss',
+            name: 'SS UDP Off',
+            server: 'ss.example.com',
+            port: 8388,
+            cipher: 'aes-128-gcm',
+            password: 'secret',
+            udp: false,
+        });
+
+        expect(enabled).to.equal(
+            `ss://${Base64.encode(
+                'aes-128-gcm:secret',
+            )}@ss.example.com:8388?udp=1#SS%20UDP%20On`,
+        );
+        expect(disabled).to.equal(
+            `ss://${Base64.encode(
+                'aes-128-gcm:secret',
+            )}@ss.example.com:8388?udp=0#SS%20UDP%20Off`,
         );
     });
 
@@ -2502,7 +2540,7 @@ describe('Proxy text producers', function () {
         expect(output).to.equal(
             `ss://${Base64.encode(
                 'aes-128-gcm:secret',
-            )}@ss-upgrade.example.com:443?sni=ss-upgrade.example.com&type=httpupgrade&path=%2Fupgrade%3Fa%3D1%26b%3D2%26ed%3D1024&host=upgrade.example.com&security=tls#SS%20Upgrade`,
+            )}@ss-upgrade.example.com:443?udp=0&sni=ss-upgrade.example.com&type=httpupgrade&path=%2Fupgrade%3Fa%3D1%26b%3D2%26ed%3D1024&host=upgrade.example.com&security=tls#SS%20Upgrade`,
         );
 
         const reparsed = ProxyUtils.parse(output)[0];
@@ -2540,7 +2578,7 @@ describe('Proxy text producers', function () {
         expect(output).to.equal(
             `ss://${Base64.encode(
                 'aes-128-gcm:secret',
-            )}@ss-ws.example.com:443?sni=ss-ws.example.com&type=ws&path=%2Fws%3Fa%3D1%26b%3D2%26ed%3D2048&host=cdn.example.com&security=tls#SS%20WS%20Early`,
+            )}@ss-ws.example.com:443?udp=0&sni=ss-ws.example.com&type=ws&path=%2Fws%3Fa%3D1%26b%3D2%26ed%3D2048&host=cdn.example.com&security=tls#SS%20WS%20Early`,
         );
 
         const reparsed = ProxyUtils.parse(output)[0];
@@ -2668,12 +2706,12 @@ describe('Proxy text producers', function () {
         expect(muxOnOutput).to.equal(
             `ss://${Base64.encode(
                 'aes-128-gcm:secret',
-            )}@ss.example.com:443/?plugin=${muxOnPlugin}#SS%20Boolean%20Mux%20On`,
+            )}@ss.example.com:443/?plugin=${muxOnPlugin}&udp=0#SS%20Boolean%20Mux%20On`,
         );
         expect(muxOffOutput).to.equal(
             `ss://${Base64.encode(
                 'aes-128-gcm:secret',
-            )}@ss.example.com:443/?plugin=${muxOffPlugin}#SS%20Boolean%20Mux%20Off`,
+            )}@ss.example.com:443/?plugin=${muxOffPlugin}&udp=0#SS%20Boolean%20Mux%20Off`,
         );
     });
 
@@ -2717,8 +2755,8 @@ describe('Proxy text producers', function () {
 
         expect(output).to.equal(
             [
-                `ss://${userInfo}@ss.example.com:443/?plugin=${muxOnPlugin}#Clash%20Boolean%20Mux%20On`,
-                `ss://${userInfo}@ss.example.com:443/?plugin=${muxOffPlugin}#Clash%20Boolean%20Mux%20Off`,
+                `ss://${userInfo}@ss.example.com:443/?plugin=${muxOnPlugin}&udp=1#Clash%20Boolean%20Mux%20On`,
+                `ss://${userInfo}@ss.example.com:443/?plugin=${muxOffPlugin}&udp=1#Clash%20Boolean%20Mux%20Off`,
             ].join('\n'),
         );
     });
@@ -2763,8 +2801,8 @@ describe('Proxy text producers', function () {
 
         expect(output).to.equal(
             [
-                `ss://${userInfo}@ss.example.com:443/?plugin=${muxOnPlugin}#Clash%20String%20Mux%20On`,
-                `ss://${userInfo}@ss.example.com:443/?plugin=${muxOffPlugin}#Clash%20String%20Mux%20Off`,
+                `ss://${userInfo}@ss.example.com:443/?plugin=${muxOnPlugin}&udp=1#Clash%20String%20Mux%20On`,
+                `ss://${userInfo}@ss.example.com:443/?plugin=${muxOffPlugin}&udp=1#Clash%20String%20Mux%20Off`,
             ].join('\n'),
         );
     });
