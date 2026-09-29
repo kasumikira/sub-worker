@@ -401,7 +401,11 @@ function URI_SS() {
             }
         }
 
-        proxy.udp = !!params['udp'];
+        proxy.udp = ![false, 0, '0', 'false', 'off'].includes(
+            typeof params['udp'] === 'string'
+                ? params['udp'].toLowerCase()
+                : params['udp'],
+        );
 
         const serverAndPort = serverAndPortArray[1];
         const portIdx = serverAndPort.lastIndexOf(':');
@@ -2833,6 +2837,9 @@ function Loon_WireGuard() {
         }
 
         let dns;
+        const serverDns = line.match(
+            /(?:^|,)\s*server-dns\s*=\s*(?:"([^"]*)"|([^"]*?))(?=\s*(?:,\s*[\w-]+\s*=|$))/i,
+        );
         let dnsv4 = line.match(/(,|^)\s*?dns\s*?=\s*?"?(.+?)"?\s*?(,|$)/i)?.[2];
         let dnsv6 = line.match(
             /(,|^)\s*?dnsv6\s*?=\s*?"?(.+?)"?\s*?(,|$)/i,
@@ -2880,6 +2887,10 @@ function Loon_WireGuard() {
             'allowed-ips': allowedIps,
             'preshared-key': preSharedKey,
             dns,
+            'server-dns': (serverDns?.[1] ?? serverDns?.[2])
+                ?.split(',')
+                .map((item) => item.trim())
+                .filter(Boolean),
             udp: true,
             peers: [
                 {
@@ -2988,7 +2999,7 @@ function Surge_Trojan() {
 }
 
 const LOON_ONLY_OPTIONS =
-    /(^|,)\s*(fast-open|over-tls|tls-name|ip-mode|tls-cert-sha256|tls-pubkey-sha256)\s*=/i;
+    /(^|,)\s*(fast-open|over-tls|tls-name|ip-mode|tls-cert-sha256|tls-pubkey-sha256|server-dns)\s*=/i;
 
 function Surge_Http() {
     const name = 'Surge HTTP Parser';

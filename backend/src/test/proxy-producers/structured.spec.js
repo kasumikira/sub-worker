@@ -96,7 +96,8 @@ describe('Proxy structured producers', function () {
 
     it('normalizes Loon tls-profile before emitting Mihomo client fingerprints', function () {
         for (const [profile, fingerprint] of [
-            ['ios26', 'ios'],
+            ['safari-ios18', 'ios'],
+            ['safari-ios-26', 'ios'],
             ['chrome147', 'chrome'],
         ]) {
             const [proxy] = ProxyUtils.parse(
@@ -4029,6 +4030,60 @@ describe('Proxy structured producers', function () {
         expect(errors).to.have.length(0);
     });
 
+    it('distinguishes sing-box SSH private key content from paths', function () {
+        const privateKey =
+            '-----BEGIN OPENSSH PRIVATE KEY-----\ntest-key-data\n-----END OPENSSH PRIVATE KEY-----';
+        const encryptedKey =
+            '-----BEGIN ENCRYPTED PRIVATE KEY-----\ntest-key-data\n-----END ENCRYPTED PRIVATE KEY-----';
+        for (const [options, expected] of [
+            [{ 'private-key': privateKey }, { private_key: privateKey }],
+            [{ 'private-key': encryptedKey }, { private_key: encryptedKey }],
+            [{ 'private-key': './id_rsa' }, { private_key_path: './id_rsa' }],
+            [
+                { 'private-key': '/keys/id_ed25519' },
+                { private_key_path: '/keys/id_ed25519' },
+            ],
+            [{ privateKey }, { private_key: privateKey }],
+            [{ privateKey: './id_rsa' }, { private_key_path: './id_rsa' }],
+            [
+                { 'private-key': privateKey, privateKey: './id_rsa' },
+                { private_key: privateKey },
+            ],
+            [
+                { 'private-key': './id_rsa', privateKey },
+                { private_key_path: './id_rsa' },
+            ],
+            [
+                { 'private-key': '', privateKey: './id_rsa' },
+                { private_key_path: './id_rsa' },
+            ],
+            [{ 'private-key': '' }, {}],
+            [{}, {}],
+        ]) {
+            const output = loadProducedJson('sing-box', {
+                type: 'ssh',
+                name: 'SSH',
+                server: 'ssh.example.com',
+                port: 22,
+                username: 'user',
+                'private-key-passphrase': 'test-passphrase',
+                ...options,
+            });
+
+            expect(output.outbounds).to.deep.equal([
+                {
+                    type: 'ssh',
+                    tag: 'SSH',
+                    server: 'ssh.example.com',
+                    server_port: 22,
+                    user: 'user',
+                    private_key_passphrase: 'test-passphrase',
+                    ...expected,
+                },
+            ]);
+        }
+    });
+
     it('preserves supported HTTP root headers for sing-box and JSON outputs', function () {
         const buildProxy = (name) => ({
             type: 'http',
@@ -4391,6 +4446,13 @@ describe('Proxy structured producers', function () {
                 name: 'Sing-box WG Explicit CIDR',
                 server: 'wg-explicit.example.com',
                 port: 51820,
+                system: true,
+                _name: 'wg-test',
+                _listen_port: '51821',
+                _on_demand: true,
+                _udp_mapping: 'address_dependent',
+                _udp_filtering: 'address_and_port_dependent',
+                _udp_nat_max: '8192',
                 'private-key': 'private-key-1',
                 'public-key': 'public-key-1',
                 ip: '10.0.0.2',
@@ -4419,18 +4481,37 @@ describe('Proxy structured producers', function () {
 
         expectSubset(explicit, {
             type: 'wireguard',
+            tag: 'Sing-box WG Explicit CIDR',
+            system: true,
+            name: 'wg-test',
+            listen_port: 51821,
+            on_demand: true,
+            udp_mapping: 'address_dependent',
+            udp_filtering: 'address_and_port_dependent',
+            udp_nat_max: 8192,
             address: ['10.0.0.2/24', 'fd00::2/64'],
         });
         expectSubset(defaults, {
             type: 'wireguard',
             address: ['10.0.0.3/32', 'fd00::3/128'],
         });
+        expect(defaults).to.not.have.any.keys(
+            'name',
+            'listen_port',
+            'on_demand',
+            'udp_mapping',
+            'udp_filtering',
+            'udp_nat_max',
+        );
     });
 
     it('emits Tailscale endpoint fields for sing-box exports', function () {
         const output = loadProducedJson('sing-box', {
             type: 'tailscale',
             name: 'Mihomo TS',
+            _listen_port: '41641',
+            _taildrop_directory: './taildrop',
+            _on_demand: true,
             'state-dir': './mihomo-ts',
             'auth-key': 'tskey-auth-test',
             'control-url': 'https://headscale.example.com',
@@ -4450,6 +4531,9 @@ describe('Proxy structured producers', function () {
 
         expectSubset(mihomo, {
             type: 'tailscale',
+            listen_port: 41641,
+            taildrop_directory: './taildrop',
+            on_demand: true,
             state_directory: './mihomo-ts',
             auth_key: 'tskey-auth-test',
             control_url: 'https://headscale.example.com',
@@ -4462,6 +4546,100 @@ describe('Proxy structured producers', function () {
             udp_timeout: '30s',
         });
         expect(mihomo).to.not.have.property('udp');
+    });
+
+    it('preserves false and zero in sing-box endpoint options without leaking protocol fields', function () {
+        const { endpoints } = loadProducedJson(
+            'sing-box',
+            ['wireguard', 'tailscale'].map((type) => ({
+                type,
+                name: type,
+                server: 'wg.example.com',
+                port: 51820,
+                ip: '10.0.0.2',
+                'private-key': 'private-key',
+                'public-key': 'public-key',
+                _name: 'wg-test',
+                _listen_port: 0,
+                _on_demand: false,
+                _udp_mapping: 'endpoint_independent',
+                _udp_filtering: 'endpoint_independent',
+                _udp_nat_max: 0,
+                _taildrop_directory: './taildrop',
+            })),
+        );
+
+        expect(endpoints).to.have.length(2);
+        for (const endpoint of endpoints) {
+            expectSubset(endpoint, { listen_port: 0, on_demand: false });
+            expect(
+                Object.keys(endpoint).some((key) => key.startsWith('_')),
+            ).to.equal(false);
+        }
+        expectSubset(endpoints[0], {
+            name: 'wg-test',
+            udp_mapping: 'endpoint_independent',
+            udp_filtering: 'endpoint_independent',
+            udp_nat_max: 0,
+        });
+        expect(endpoints[0]).to.not.have.property('taildrop_directory');
+        expect(endpoints[1].taildrop_directory).to.equal('./taildrop');
+        expect(endpoints[1]).to.not.have.any.keys(
+            'name',
+            'udp_mapping',
+            'udp_filtering',
+            'udp_nat_max',
+        );
+    });
+
+    it('validates optional sing-box endpoint values and integer bounds', function () {
+        for (const [value, listenPort, udpNatMax] of [
+            [undefined, undefined, undefined],
+            [null, undefined, undefined],
+            ['0', 0, 0],
+            [65535, 65535, 65535],
+            [65536, undefined, 65536],
+            ['4294967295', undefined, 4294967295],
+            [4294967296, undefined, undefined],
+            [-1, undefined, undefined],
+            [1.5, undefined, undefined],
+            ['51820x', undefined, undefined],
+            [true, undefined, undefined],
+        ]) {
+            const { endpoints } = loadProducedJson(
+                'sing-box',
+                ['wireguard', 'tailscale'].map((type) => ({
+                    type,
+                    name: type,
+                    server: 'wg.example.com',
+                    port: 51820,
+                    ip: '10.0.0.2',
+                    'private-key': 'private-key',
+                    'public-key': 'public-key',
+                    _listen_port: value,
+                    _udp_nat_max: value,
+                    _on_demand: 'false',
+                    _name: 123,
+                    _taildrop_directory: true,
+                    _udp_mapping: 'invalid',
+                    _udp_filtering: 'invalid',
+                })),
+            );
+
+            expect(endpoints).to.have.length(2);
+            for (const endpoint of endpoints) {
+                expect(endpoint.listen_port).to.equal(listenPort);
+                expect(endpoint).to.not.have.any.keys(
+                    'on_demand',
+                    'name',
+                    'taildrop_directory',
+                    'udp_mapping',
+                    'udp_filtering',
+                );
+            }
+            expect(endpoints[0].udp_nat_max).to.equal(udpNatMax);
+            expect(endpoints[1]).to.not.have.property('udp_nat_max');
+        }
     });
 
     it('does not mix Tailscale control_http_client with legacy sing-box dialer fields', function () {
