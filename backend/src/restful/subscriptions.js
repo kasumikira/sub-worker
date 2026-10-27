@@ -264,7 +264,11 @@ function getSubscription(req, res) {
     let { raw } = req.query;
     const allSubs = $.read(SUBS_KEY);
     const sub = findByName(allSubs, name);
-    delete sub.subscriptions;
+    if (sub && Object.hasOwn(sub, 'subscriptions')) {
+        $.warn(
+            `Subscription ${name} contains an unexpected subscriptions field`,
+        );
+    }
     if (sub) {
         if (raw) {
             res.set('content-type', 'application/json')
