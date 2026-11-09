@@ -12,6 +12,7 @@ import { produceArtifact } from '@/restful/sync';
 import { isMihomoConfigFile } from '@/utils/file-type';
 import { SETTINGS_KEY } from '@/constants';
 import YAML from '@/utils/yaml';
+import { getDynamicFunctionFactory } from '@/utils/dynamic-function-runtime';
 
 import env from '@/utils/env';
 import {
@@ -1759,6 +1760,27 @@ function createDynamicFunction(name, script, $arguments, $options) {
         getRmainingDays,
         normalizeFlowHeader,
     };
+    const dynamicFunctionFactory = getDynamicFunctionFactory();
+    if (dynamicFunctionFactory) {
+        return dynamicFunctionFactory({
+            name,
+            script,
+            bindings: {
+                $arguments,
+                $options,
+                $substore: $,
+                lodash,
+                ProxyUtils,
+                yaml: ProxyUtils.yaml,
+                b64d: ProxyUtils.Base64.decode,
+                b64e: ProxyUtils.Base64.encode,
+                DOMAIN_RESOLVERS,
+                scriptResourceCache,
+                flowUtils,
+                produceArtifact,
+            },
+        });
+    }
     if ($.env.isLoon) {
         return new Function(
             '$arguments',

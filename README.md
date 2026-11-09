@@ -5,6 +5,129 @@
 
 > Advanced Subscription Manager for QX, Loon, Surge, Stash, Egern and Shadowrocket
 
+## Cloudflare Workers backend
+
+This target uses one Durable Object to serialize access and to persist data in
+its own built-in SQLite storage, so no external database is required.
+
+### Current feature status
+
+Supported:
+
+- The core Sub-Store backend APIs for managing subscriptions, collections,
+  artifacts, files, modules, tokens, settings, and backup data.
+- Remote subscription download, parsing, processing, preview, sharing, and
+  format production through the Worker's `fetch` implementation.
+- Persistent storage in the SQLite-backed Durable Object. Data survives
+  Durable Object eviction, Worker restarts, and ordinary code deployments.
+- A single, fixed Durable Object named `default`, with request-level
+  serialization to protect the original in-memory Sub-Store data model.
+- Management API protection through the secret
+  `SUB_STORE_FRONTEND_BACKEND_PATH`, plus configurable CORS origins. Public
+  download, share, preview, and subscription-flow routes remain available
+  without the management path.
+- Static Peggy parsers bundled at build time; parser generation is not
+  performed dynamically in the Worker.
+- Dynamic operator, filter, and response-transformer scripts through the
+  embedded QuickJS runtime, subject to the compatibility limits below.
+- Deployment through Wrangler or the included GitHub Actions workflow.
+
+Not implemented or intentionally unsupported:
+
+- Frontend asset hosting. Use the official frontend or host a frontend
+  separately.
+- Scheduled and cron tasks, including artifact cron, sync cron, download cron,
+  upload cron, produce cron, and MMDB cron. Cron fields may be stored but are
+  not executed by this Worker target.
+- Node.js-only facilities such as local filesystem access, child processes,
+  local MMDB files, Node proxy agents, and Node environment-based frontend
+  hosting.
+- Native dynamic JavaScript evaluation by the Workers runtime, which does not
+  implement it. Dynamic scripts run inside the embedded QuickJS engine
+  described below.
+- Push notifications. Notifications are written to Worker logs only.
+- Values larger than 1,900,000 bytes in a single storage entry. Large files or
+  unusually large top-level datasets may exceed this limit.
+
+### QuickJS compatibility
+
+Workers cannot evaluate JavaScript source at runtime, so dynamic operators,
+filters, and response transformers are executed by an embedded QuickJS engine.
+The script is user-authored and runs against the same host API Sub-Store
+already exposes to it elsewhere. This deployment is intended for personal use:
+dynamic scripts are trusted, and QuickJS is used only as an execution engine,
+not as a security sandbox or permission boundary. The limits described below
+protect runtime availability rather than defending against malicious scripts.
+
+Available inside QuickJS:
+
+- Everything QuickJS implements itself, including promises. Host functions
+  that return a promise (`produceArtifact`, `download`, DNS resolvers, and so
+  on) can be awaited directly.
+- `$arguments`, `$options`, `console`, `$substore` (`env`, `read`, `write`,
+  `delete`, and the logging methods), `$persistentStore`, and
+  `$notification.post`. Notifications are written to the Worker log instead of
+  being pushed.
+- `produceArtifact`, lodash, `ProxyUtils`, `yaml`, `b64d`, `b64e`,
+  `DOMAIN_RESOLVERS`, `scriptResourceCache`, `flowUtils`, `Buffer`, `atob`,
+  and `btoa`. Guest callbacks can be passed to synchronous host APIs, so calls
+  such as `lodash.map(values, value => value.name)` work. A host API must not
+  retain such a callback or invoke it asynchronously.
+- Plain objects and arrays cross the host boundary by value. Dates currently
+  cross as ISO strings, typed-array views cross as `ArrayBuffer`, and unsupported
+  object types such as `Map`, `Set`, `RegExp`, `Error`, or custom class instances
+  fail explicitly instead of being silently converted to empty objects.
+- Each invocation uses an isolated QuickJS runtime with its own 32 MiB memory
+  limit, 512 KiB stack limit, job queue, and interrupt handler. The CPU
+  deadline is one second per execution segment; waiting on host I/O does not
+  consume it. These guards only keep a runaway script from taking the Durable
+  Object down with it.
+
+Unavailable inside QuickJS:
+
+- `fetch`, timers, `queueMicrotask`, WebSocket, XMLHttpRequest, `$httpClient`,
+  and `$substore.http`. Remote requests have to go through the Worker backend;
+  referencing them from a script fails with a plain `is not defined` error.
+- `require`, `process`, `global`, `module`, and `exports`.
+- Host APIs that retain a script callback or invoke it asynchronously. Callback
+  bridging currently covers synchronous calls only.
+
+### Build and deploy
+
+To build and deploy:
+
+```sh
+cd backend
+pnpm bundle:cloudflare
+cd ..
+pnpm dlx wrangler@latest deploy
+```
+
+The included `deploy-cloudflare.yml` workflow deploys pushes to `master` and
+also supports manual runs. Add `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` to the repository's GitHub Actions secrets. The
+workflow does not receive or manage the runtime authentication secret.
+
+After deployment, set `SUB_STORE_FRONTEND_BACKEND_PATH` as an encrypted Secret
+in the Worker's Cloudflare dashboard settings before using the management API.
+This path is the management credential: use a long, random, unguessable value
+that starts with `/` and does not end with `/`. Do not use a short example such
+as `/abc123`. For example, generate a value locally with:
+
+```sh
+printf '/%s\n' "$(openssl rand -hex 32)"
+```
+
+Treat the generated path like a password and do not commit it or pass it
+through the deployment workflow. Append it directly to the Worker origin when
+configuring the frontend; for example, the secret `/random-path` produces
+`https://your-worker.workers.dev/random-path`. Routes classified as public by
+the Worker, including `/download`, `/share`, `/api/preview`, and
+`/api/sub/flow`, remain accessible without this management path. The official
+frontend `https://sub-store.vercel.app` is in the default CORS allowlist; this
+Worker does not deploy frontend assets. The deployment always uses the single
+Durable Object named `default`; its name is not configurable.
+
 [![Build](https://github.com/sub-store-org/Sub-Store/actions/workflows/main.yml/badge.svg)](https://github.com/sub-store-org/Sub-Store/actions/workflows/main.yml) ![GitHub](https://img.shields.io/github/license/sub-store-org/Sub-Store) ![GitHub issues](https://img.shields.io/github/issues/sub-store-org/Sub-Store) ![GitHub closed pull requests](https://img.shields.io/github/issues-pr-closed-raw/Peng-Ym/Sub-Store) ![Size](https://img.shields.io/github/languages/code-size/sub-store-org/Sub-Store)
 <br>
 <a href="https://trendshift.io/repositories/4572" target="_blank"><img src="https://trendshift.io/api/badge/repositories/4572" alt="sub-store-org%2FSub-Store | Trendshift" height="25"/></a>

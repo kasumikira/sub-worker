@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sub-store-cloudflare",
+  "main": "dist/sub-store.cloudflare.js",
+  "build": {
+    "command": "pnpm bundle:cloudflare"
+  },
+  "compatibility_date": "2026-08-31",
+  "durable_objects": {
+    "bindings": [{ "name": "SUB_STORE", "class_name": "SubStoreDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SubStoreDO"] }],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false,
+      "persist": true,
+      "head_sampling_rate": 1
+    }
+  },
+  "env": {
+    "dev": {
+      "workers_dev": true,
+      "vars": {
+        "SUB_STORE_FRONTEND_BACKEND_PATH": "/dev"
+      },
+      "durable_objects": {
+        "bindings": [{ "name": "SUB_STORE", "class_name": "SubStoreDO" }]
+      }
+    }
+  }
+}
