@@ -1,6 +1,8 @@
+import _ from 'lodash';
 import { Result, isPresent } from './utils';
-import { isNotBlank, getIfNotBlank } from '@/utils';
+import { isNotBlank, getIfNotBlank, isPlainObject } from '@/utils';
 import $ from '@/core/app';
+import { SURGE_XHTTP_FIELDS } from '../surge-xhttp';
 import { formatSurgeVmessEncryptMethod } from '../vmess-security';
 
 const targetPlatform = 'Surge';
@@ -164,14 +166,14 @@ function isUnsupportedSnellV6Obfs(proxy) {
 export default function Surge_Producer() {
     const produce = (proxy, type, opts = {}) => {
         if (
-            ['ws'].includes(proxy.network) &&
-            proxy['ws-opts']?.['v2ray-http-upgrade']
+            proxy.network === 'ws' &&
+            proxy['ws-opts']?.['v2ray-http-upgrade'] &&
+            !['vmess', 'trojan', 'vless'].includes(proxy.type)
         ) {
             throw unsupported(
                 `Platform ${targetPlatform} does not support network ${proxy.network} with http upgrade`,
             );
         }
-        proxy.name = proxy.name.replace(/=|,/g, '');
         if (proxy.ports) {
             proxy.ports = String(proxy.ports);
         }
@@ -181,7 +183,8 @@ export default function Surge_Producer() {
             case 'trojan':
                 return trojan(proxy);
             case 'vmess':
-                return vmess(proxy, opts['include-unsupported-proxy']);
+            case 'vless':
+                return v2ray(proxy, opts['include-unsupported-proxy']);
             case 'http':
                 return http(proxy);
             case 'h2-connect':
@@ -452,6 +455,15 @@ function trusttunnel(proxy) {
     result.append(`${proxy.name}=trust-tunnel,${proxy.server},${proxy.port}`);
     result.appendIfPresent(`,username="${proxy.username}"`, 'username');
     result.appendIfPresent(`,password="${proxy.password}"`, 'password');
+    if (isPresent(proxy, 'client-random-auth-key')) {
+        const key = stripSurgeQuotes(proxy['client-random-auth-key']);
+        if (typeof key !== 'string' || !/^[0-9a-f]+$/i.test(key)) {
+            throw new Error(
+                'TrustTunnel client-random-auth-key must be a hex string',
+            );
+        }
+        result.append(`,client-random-auth-key=${key}`);
+    }
     appendHeaders(result, proxy);
     warnMaxStreamsIfNeeded(proxy);
     result.appendIfPresent(
@@ -617,13 +629,16 @@ function h2Connect(proxy) {
     return result.toString();
 }
 
-function vmess(proxy, includeUnsupportedProxy) {
+function v2ray(proxy, includeUnsupportedProxy) {
+    const isVless = proxy.type === 'vless';
     const result = new Result(proxy);
     result.append(`${proxy.name}=${proxy.type},${proxy.server},${proxy.port}`);
     result.appendIfPresent(`,username=${proxy.uuid}`, 'uuid');
-    const encryptMethod = formatSurgeVmessEncryptMethod(proxy.cipher);
-    if (encryptMethod) {
-        result.append(`,encrypt-method=${encryptMethod}`);
+    if (!isVless) {
+        const encryptMethod = formatSurgeVmessEncryptMethod(proxy.cipher);
+        if (encryptMethod) {
+            result.append(`,encrypt-method=${encryptMethod}`);
+        }
     }
 
     const ip_version = ipVersions[proxy['ip-version']] || proxy['ip-version'];
@@ -634,21 +649,17 @@ function vmess(proxy, includeUnsupportedProxy) {
         'no-error-alert',
     );
 
-    // transport
-    handleTransport(result, proxy, includeUnsupportedProxy);
-
-    // AEAD
-    if (isPresent(proxy, 'aead')) {
-        result.append(`,vmess-aead=${proxy.aead}`);
+    if (isVless) {
+        appendVlessParams(result, proxy);
     } else {
-        result.append(`,vmess-aead=${proxy.alterId === 0}`);
+        handleTransport(result, proxy, includeUnsupportedProxy);
+        const aead = isPresent(proxy, 'aead')
+            ? proxy.aead
+            : proxy.alterId === 0;
+        result.append(`,vmess-aead=${aead}`);
+        result.appendIfPresent(`,tls=${proxy.tls}`, 'tls');
+        appendTlsProxyParams(result, proxy, Boolean(proxy.tls));
     }
-
-    // tls
-    result.appendIfPresent(`,tls=${proxy.tls}`, 'tls');
-
-    // tls verification
-    appendTlsProxyParams(result, proxy, Boolean(proxy.tls));
 
     // tfo
     result.appendIfPresent(`,tfo=${proxy.tfo}`, 'tfo');
@@ -684,6 +695,104 @@ function vmess(proxy, includeUnsupportedProxy) {
     );
 
     return result.toString();
+}
+
+function appendVlessParams(result, proxy) {
+    const network = proxy.network ?? 'tcp';
+    const reality = proxy['reality-opts'];
+    const tls = proxy.tls || reality;
+    const encrypted =
+        isNotBlank(proxy.encryption) && proxy.encryption.trim() !== 'none';
+    if (!['tcp', 'raw', 'none', 'ws', 'grpc', 'xhttp'].includes(network)) {
+        throw unsupported(`VLESS network ${network} is unsupported`);
+    }
+    if (proxy.encryption && /[,\r\n"']/.test(proxy.encryption)) {
+        throw unsupported('VLESS encryption contains unsupported characters');
+    }
+    const supportsVision =
+        network !== 'grpc' &&
+        (encrypted || (tls && network !== 'ws' && network !== 'xhttp'));
+    if (
+        (network === 'ws' && reality) ||
+        (network === 'grpc' && !tls) ||
+        (proxy.flow && !supportsVision)
+    ) {
+        throw unsupported(
+            'Unsupported VLESS transport, TLS or flow combination',
+        );
+    }
+
+    if (network === 'ws') {
+        handleTransport(result, proxy);
+    } else if (network === 'grpc') {
+        result.append(',grpc=true');
+        const grpc = proxy['grpc-opts'];
+        for (const [key, value] of [
+            ['grpc-service-name', grpc?.['grpc-service-name']],
+            ['grpc-mode', grpc?.['_grpc-type']],
+            ['grpc-authority', grpc?.['_grpc-authority']],
+        ]) {
+            if (value) result.append(`,${key}=${value}`);
+        }
+    } else if (network === 'xhttp') {
+        appendXhttpParams(result, proxy);
+    }
+
+    if (proxy.flow) result.append(`,flow=${proxy.flow}`);
+    if (proxy.encryption) result.append(`,encryption=${proxy.encryption}`);
+    if (reality) {
+        result.append(`,reality-public-key=${reality['public-key']}`);
+        if (reality['short-id']) {
+            result.append(`,reality-short-id=${reality['short-id']}`);
+        }
+        result.appendIfPresent(`,sni="${proxy.sni}"`, 'sni');
+        appendAlpn(result, proxy);
+    } else {
+        result.appendIfPresent(`,tls=${proxy.tls}`, 'tls');
+        appendTlsProxyParams(result, proxy, Boolean(tls));
+    }
+}
+
+function appendXhttpParams(result, proxy) {
+    const xhttp = proxy['xhttp-opts'];
+    // A single Surge policy cannot represent a separate XHTTP download transport.
+    if (xhttp?.['download-settings']) {
+        throw unsupported('VLESS XHTTP download-settings are unsupported');
+    }
+
+    result.append(',xhttp=true');
+    const headers = isPlainObject(xhttp?.headers)
+        ? Object.entries(xhttp.headers)
+        : [];
+    const host =
+        xhttp?.host ?? headers.find(([key]) => /^host$/i.test(key))?.[1];
+    for (const [key, field] of Object.entries(SURGE_XHTTP_FIELDS)) {
+        const rawValue = key === 'host' ? host : _.get(xhttp, field);
+        if (rawValue == null) continue;
+        const rawText = String(rawValue);
+        const value = stripSurgeQuotes(rawText);
+        if (!value && key !== 'session-table') continue;
+        if (/[\r\n]/.test(rawText) || value.includes('"')) {
+            throw unsupported(
+                `VLESS xhttp-${key} contains unsupported characters`,
+            );
+        }
+        const parameter =
+            !value || /[,'\s]/.test(value) ? quoteSurgeValue(value) : value;
+        result.append(`,xhttp-${key}=${parameter}`);
+    }
+
+    const extraHeaders = headers.filter(([key]) => !/^host$/i.test(key));
+    if (
+        extraHeaders.some(
+            ([key, value]) =>
+                /[,="':|\r\n]/.test(key) || /[\r\n]/.test(String(value)),
+        )
+    ) {
+        throw unsupported('VLESS xhttp-headers contain unsupported characters');
+    }
+    const value = formatHeaderMap(Object.fromEntries(extraHeaders), '|');
+    if (value) result.append(`,xhttp-headers=${quoteSurgeValue(value)}`);
 }
 
 function ssh(proxy) {
@@ -1327,6 +1436,9 @@ function handleTransport(result, proxy, includeUnsupportedProxy) {
         if (proxy.network === 'ws') {
             result.append(`,ws=true`);
             if (isPresent(proxy, 'ws-opts')) {
+                if (proxy['ws-opts']['v2ray-http-upgrade']) {
+                    result.append(',ws-http-upgrade=true');
+                }
                 result.appendIfPresent(
                     `,ws-path=${proxy['ws-opts'].path}`,
                     'ws-opts.path',

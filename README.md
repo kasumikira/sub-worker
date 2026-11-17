@@ -130,12 +130,16 @@ Durable Object named `default`; its name is not configurable.
 
 [![Build](https://github.com/sub-store-org/Sub-Store/actions/workflows/main.yml/badge.svg)](https://github.com/sub-store-org/Sub-Store/actions/workflows/main.yml) ![GitHub](https://img.shields.io/github/license/sub-store-org/Sub-Store) ![GitHub issues](https://img.shields.io/github/issues/sub-store-org/Sub-Store) ![GitHub closed pull requests](https://img.shields.io/github/issues-pr-closed-raw/Peng-Ym/Sub-Store) ![Size](https://img.shields.io/github/languages/code-size/sub-store-org/Sub-Store)
 <br>
-<a href="https://trendshift.io/repositories/4572" target="_blank"><img src="https://trendshift.io/api/badge/repositories/4572" alt="sub-store-org%2FSub-Store | Trendshift" height="25"/></a>
-<a href="https://www.buymeacoffee.com/PengYM" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" height="25"/></a></a>
+<a href="https://trendshift.io/repositories/4572" target="_blank"><img src="https://trendshift.io/api/badge/repositories/4572" alt="sub-store-org%2FSub-Store | Trendshift" height="20"/></a>
+<a href="https://www.buymeacoffee.com/PengYM" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" height="20"/></a></a>
 [![联系推广](https://img.shields.io/badge/%E8%81%94%E7%B3%BB%E6%8E%A8%E5%B9%BF-26A5E4?style=flat&logo=telegram&logoColor=white)](https://t.me/xream_bot)
 
 <table>
 <tbody>
+<tr>
+<td width="180"><a href="https://mtnapi.com/r/cvctl"><img src="./assets/banners/mtnapi.png" alt="Thordata" width="150"></a></td>
+<td><a href="https://mtnapi.com/r/cvctl">千山算力</a> 是一家稳定、低价的 AI 服务中转商，GPT 模型最低倍率 0.07x，支持 GPT 2.6 最新生图模型，价格最低 0.05/张，每周四限时活动，不定期开展福利，支持开票，欢迎广大用户接入。<a href="https://mtnapi.com/r/cvctl">注册使用</a></td>
+</tr>
 <tr>
 <td width="180"><a href="https://api.muteki.site/register?aff=XREAM&promo=XREAM"><img src="./assets/banners/MaruCode.jpg" alt="MaruCode" width="150"></a></td>
 <td><a href="https://api.muteki.site/register?aff=XREAM&promo=XREAM">MaruCode</a> 是一家偶尔做做慈善的小破站 API，自营号池，不搞充值营销套路，主要提供 Codex、Claude Code、GPT Image-2 等主流模型，支持 WebSocket 协议，明码标价(Codex 0.3x, CC 1.5x)，透明汇率(1:1)，<a href="https://api.muteki.site/register?aff=XREAM&promo=XREAM">新用户注册</a> 送 2 刀 💰 <a href="https://images-2.muteki.site">生图工作台 🖼</a></td>
@@ -144,6 +148,8 @@ Durable Object named `default`; its name is not configurable.
 </table>
 
 📚 [文档/Doc](https://sub-store-org.github.io/doc) 🆕, [Wiki](https://github.com/sub-store-org/Sub-Store/wiki)
+
+> **Frontend update:** Access to `sub-store.vercel.app` on Vercel is restricted. For now, use the default frontend at [sub.xream.eu.org](https://sub.xream.eu.org), hosted on Cloudflare Pages.
 
 ## sub.store Domain Safety Notice
 
@@ -157,7 +163,7 @@ If a request does not go through the rewrite, the data will be sent to the publi
 
 You can map `sub.store` to `127.0.0.1` or another local address to prevent accidental access to the public `sub.store`. However, ordinary users may still send requests to the public `sub.store` after switching or toggling configuration modules.
 
-1. It could, in theory, redirect users to a fake frontend. This is only a possibility and does not imply that the owner of `sub.store` would do this. Note: The official frontend is `https://sub-store.vercel.app`.
+1. It could, in theory, redirect users to a fake frontend. This is only a possibility and does not imply that the owner of `sub.store` would do this. The current official frontend is [sub.xream.eu.org](https://sub.xream.eu.org).
 2. It could receive user data from `sub.store`.
 
 This creates a data leakage risk.
@@ -179,8 +185,8 @@ sub.store = 127.0.0.1
 
 Sub-Store also supports a configurable browser CORS allowlist for the backend API. This does not change the module rewrite domain, but it limits which browser origins can read API responses through CORS.
 
-- Node/server deployments use `SUB_STORE_CORS_ALLOWED_ORIGINS`; the default is `https://sub-store.vercel.app,http://substore.stash,https://substore.stash`.
-- Proxy App modules use the `cors` module argument; the default is `https://sub-store.vercel.app,http://substore.stash,https://substore.stash`.
+- Node/server deployments use `SUB_STORE_CORS_ALLOWED_ORIGINS`; the default is `https://sub-store.vercel.app,http://substore.stash,https://substore.stash,https://sub.xream.eu.org`.
+- Proxy App modules use the `cors` module argument; the default is `https://sub-store.vercel.app,http://substore.stash,https://substore.stash,https://sub.xream.eu.org`.
 - Multiple origins can be separated by commas. Origins are matched exactly by scheme, host, and port. Set the value to `*` only when you accept the risk of any website reading the local backend through browser CORS.
 
 ## Node push notifications
@@ -218,8 +224,8 @@ Push URLs may contain secrets: treat `SUB_STORE_PUSH_SERVICE` as privileged conf
 - [x] Clash Proxy JSON/JSON5/YAML(single line)
   > [NaiveProxy](https://telegram.me/zhetengsha/4308)
 - [x] QX (SS, SSR, VMess, Trojan, HTTP, SOCKS5, VLESS, AnyTLS)
-- [x] Loon (SS, SSR, VMess, Trojan, HTTP, SOCKS5, SOCKS5-TLS, WireGuard, VLESS, Hysteria 2, AnyTLS)
-- [x] Surge (Direct, SS, VMess, Trojan, HTTP, HTTPS, HTTP/2 CONNECT, SOCKS5, SOCKS5-TLS, AnyTLS, TrustTunnel, TUIC, Snell, Hysteria 2, MASQUE(Surge), SSH(Password authentication only), External Proxy Program(only for macOS), WireGuard(Surge to Surge))
+- [x] Loon (SS, SSR, VMess, Trojan, HTTP, SOCKS5, SOCKS5-TLS, WireGuard, VLESS, Hysteria 2, AnyTLS, TailScale)
+- [x] Surge (Direct, SS, VMess, Trojan, HTTP, HTTPS, HTTP/2 CONNECT, SOCKS5, SOCKS5-TLS, AnyTLS, TrustTunnel, TUIC, Snell, Hysteria 2, VLESS, MASQUE(Surge), SSH(Password authentication only), External Proxy Program(only for macOS), WireGuard(Surge to Surge))
 - [x] mihomo(Clash.Meta) Compatible (Direct, SS, SSR, VMess, Trojan, HTTP, SOCKS5, Snell, VLESS, WireGuard, Hysteria, Hysteria 2, TUIC, SSH, mieru, sudoku, AnyTLS, MASQUE, Tailscale, GOST Relay, Shadow QUIC, ZeroTier, OpenVPN)
 
 Deprecated(The frontend doesn't show it, but the backend still supports it, with the query parameter `target=Clash`):

@@ -17,6 +17,11 @@ const isShadowRocket = 'undefined' !== typeof $rocket;
 
 const isLanceX = 'undefined' != typeof $native;
 const isGUIforCores = typeof $Plugins !== 'undefined';
+const isSubsCheckPro =
+    isLoon &&
+    typeof $loon === 'object' &&
+    $loon !== null &&
+    $loon.isSubsCheckPro === true;
 import { Base64 } from 'js-base64';
 
 function isPlainObject(obj) {
@@ -416,6 +421,7 @@ export function ENV() {
         isEgern,
         isLanceX,
         isGUIforCores,
+        isSubsCheckPro,
     };
 }
 
