@@ -192,6 +192,13 @@ function URI_PROXY() {
                 password != null ? decodeURIComponent(password) : undefined,
         };
 
+        if (tls && query) {
+            const fingerprint =
+                getPathQueryParam(query, 'fp') ||
+                getPathQueryParam(query, 'client-fingerprint');
+            if (fingerprint) proxy['client-fingerprint'] = fingerprint;
+        }
+
         return proxy;
     };
     return { name, test, parse };
@@ -900,7 +907,8 @@ function URI_VMess() {
                 }
             }
 
-            proxy['client-fingerprint'] = params.fp;
+            proxy['client-fingerprint'] =
+                params.fp ?? params['client-fingerprint'];
             proxy.alpn = params.alpn ? params.alpn.split(',') : undefined;
             // 然而 wiki 和 app 实测中都没有字段表示这个
             // proxy['skip-cert-verify'] = /(TRUE)|1/i.test(params.allowInsecure);
@@ -1882,7 +1890,7 @@ function URI_VLESS() {
                 proxy.flow = flow;
             }
         }
-        proxy['client-fingerprint'] = params.fp;
+        proxy['client-fingerprint'] = params.fp ?? params['client-fingerprint'];
         proxy.alpn = params.alpn ? params.alpn.split(',') : undefined;
         proxy['skip-cert-verify'] =
             /(TRUE)|1/i.test(params.allowInsecure) ||
@@ -2692,6 +2700,13 @@ function QX_AnyTLS() {
     return { name, test, parse };
 }
 
+function QX_Hysteria2() {
+    const name = 'QX Hysteria2 Parser';
+    const test = (line) => /^hysteria2\s*=/.test(line);
+    const parse = (line) => getQXParser().parse(line);
+    return { name, test, parse };
+}
+
 function QX_Trojan() {
     const name = 'QX Trojan Parser';
     const test = (line) => {
@@ -2743,15 +2758,11 @@ function Loon_SSR() {
     return { name, test, parse };
 }
 
+const LOON_VMESS = /^[^=,]*=\s*vmess\s*,[^,]*,[^,]*,[^,]*,\s*"/i;
+
 function Loon_VMess() {
     const name = 'Loon VMess Parser';
-    const test = (line) => {
-        // distinguish between surge vmess
-        return (
-            /^.*=\s*vmess/i.test(line.split(',')[0]) &&
-            line.indexOf('username') === -1
-        );
-    };
+    const test = (line) => LOON_VMESS.test(line);
     const parse = (line) => getLoonParser().parse(line);
     return { name, test, parse };
 }
@@ -3001,7 +3012,8 @@ function Surge_VMess() {
     const test = (line) => {
         return (
             /^.*=\s*vmess/.test(line.split(',')[0]) &&
-            line.indexOf('username') !== -1
+            line.indexOf('username') !== -1 &&
+            !LOON_VMESS.test(line)
         );
     };
     const parse = (line) => getSurgeParser().parse(line);
@@ -3020,7 +3032,10 @@ function Surge_VLESS() {
 function Surge_Trojan() {
     const name = 'Surge Trojan Parser';
     const test = (line) => {
-        return /^.*=\s*trojan/.test(line.split(',')[0]);
+        return (
+            /^.*=\s*trojan/.test(line.split(',')[0]) &&
+            !/^[^=,]*=\s*trojan\s*,[^,]*,[^,]*,\s*"/.test(line)
+        );
     };
     const parse = (line) => getSurgeParser().parse(line);
     return { name, test, parse };
@@ -3126,12 +3141,18 @@ function Surge_External() {
     return { name, test, parse };
 }
 
-function Surge_Snell() {
-    const name = 'Surge Snell Parser';
-    const test = (line) => {
-        return /^.*=\s*snell/.test(line.split(',')[0]);
+function Snell() {
+    const name = 'Snell Parser';
+    const test = (line) => /^[^=,]*=\s*(?:snell|opensnell)\s*,/i.test(line);
+    const parse = (line) => {
+        const fields = line.match(/(?:[^",]+|"[^"]*")+/g).slice(3);
+        const loonOption =
+            /^(?:(?:udp|obfs-name|ip-mode|server-dns)\s*=|block-quic\s*=\s*(?:true|false)$)/;
+        const isLoon =
+            fields[0]?.trim().startsWith('"') ||
+            fields.some((field) => loonOption.test(field.trim()));
+        return (isLoon ? getLoonParser() : getSurgeParser()).parse(line);
     };
-    const parse = (line) => getSurgeParser().parse(line);
     return { name, test, parse };
 }
 
@@ -3200,7 +3221,7 @@ export default [
     Surge_VLESS(),
     Surge_Trojan(),
     Surge_Http(),
-    Surge_Snell(),
+    Snell(),
     Surge_Tuic(),
     Surge_WireGuard(),
     Surge_Hysteria2(),
@@ -3222,6 +3243,7 @@ export default [
     QX_VMess(),
     QX_VLESS(),
     QX_AnyTLS(),
+    QX_Hysteria2(),
     QX_Trojan(),
     QX_Http(),
     QX_Socks5(),

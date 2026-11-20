@@ -142,7 +142,7 @@ Durable Object named `default`; its name is not configurable.
 </tr>
 <tr>
 <td width="180"><a href="https://api.muteki.site/register?aff=XREAM&promo=XREAM"><img src="./assets/banners/MaruCode.jpg" alt="MaruCode" width="150"></a></td>
-<td><a href="https://api.muteki.site/register?aff=XREAM&promo=XREAM">MaruCode</a> 是一家偶尔做做慈善的小破站 API，自营号池，不搞充值营销套路，主要提供 Codex、Claude Code、GPT Image-2 等主流模型，支持 WebSocket 协议，明码标价(Codex 0.3x, CC 1.5x)，透明汇率(1:1)，<a href="https://api.muteki.site/register?aff=XREAM&promo=XREAM">新用户注册</a> 送 2 刀 💰 <a href="https://images-2.muteki.site">生图工作台 🖼</a></td>
+<td><a href="https://api.muteki.site/register?aff=XREAM&promo=XREAM">MaruCode</a> 是一家偶尔做做慈善的小破站 API，自营号池，已运营半年有余，本站不搞充值营销套路，主要提供 Codex(GPT 6.2 Astra Sol等)、Claude Code(Claude Fable 5.2 Opus 5.5等)、GPT Image 2.6 等主流模型，支持 WebSocket 协议，明码标价(Codex 0.3x, CC 1.7x)，透明汇率(1:1)，欢迎学校、企业、工作室个人对接. <a href="https://images-2.muteki.site">生图工作台 🖼</a></td>
 </tr>
 </tbody>
 </table>
@@ -223,8 +223,8 @@ Push URLs may contain secrets: treat `SUB_STORE_PUSH_SERVICE` as privileged conf
 - [x] Clash Proxies YAML
 - [x] Clash Proxy JSON/JSON5/YAML(single line)
   > [NaiveProxy](https://telegram.me/zhetengsha/4308)
-- [x] QX (SS, SSR, VMess, Trojan, HTTP, SOCKS5, VLESS, AnyTLS)
-- [x] Loon (SS, SSR, VMess, Trojan, HTTP, SOCKS5, SOCKS5-TLS, WireGuard, VLESS, Hysteria 2, AnyTLS, TailScale)
+- [x] QX (SS, SSR, VMess, Trojan, HTTP, SOCKS5, VLESS, AnyTLS, Hysteria 2)
+- [x] Loon (SS, SSR, VMess, Trojan, HTTP, SOCKS5, SOCKS5-TLS, WireGuard, VLESS, Hysteria 2, AnyTLS, TailScale, Snell)
 - [x] Surge (Direct, SS, VMess, Trojan, HTTP, HTTPS, HTTP/2 CONNECT, SOCKS5, SOCKS5-TLS, AnyTLS, TrustTunnel, TUIC, Snell, Hysteria 2, VLESS, MASQUE(Surge), SSH(Password authentication only), External Proxy Program(only for macOS), WireGuard(Surge to Surge))
 - [x] mihomo(Clash.Meta) Compatible (Direct, SS, SSR, VMess, Trojan, HTTP, SOCKS5, Snell, VLESS, WireGuard, Hysteria, Hysteria 2, TUIC, SSH, mieru, sudoku, AnyTLS, MASQUE, Tailscale, GOST Relay, Shadow QUIC, ZeroTier, OpenVPN)
 
