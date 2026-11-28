@@ -15,6 +15,7 @@ async function loadParser(name) {
         plugins: [cloudflareStaticPeggy],
     });
     const sandbox = {};
+    sandbox.self = sandbox;
     vm.runInNewContext(result.outputFiles[0].text, sandbox, {
         contextCodeGeneration: { strings: false, wasm: false },
     });
