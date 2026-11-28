@@ -37,6 +37,7 @@ const grammars = String.raw`
 	const proxy = {};
     const obfs = {};
     const $ = {};
+    let mieruUdpOverTcp = false;
 
     function setQxHttpObfs(type) {
         // Preserve the original QX http-obfs token for round-trip output,
@@ -71,7 +72,7 @@ const grammars = String.raw`
     }
 }
 
-start = (trojan/shadowsocks/vmess/vless/anytls/http/socks5) {
+start = (trojan/shadowsocks/vmess/vless/anytls/mieru/hysteria2/http/socks5) {
     return proxy
 }
 
@@ -143,6 +144,18 @@ anytls = "anytls" equals address
     proxy.tls = true;
 }
 
+mieru = "mieru" equals address
+    (username/password/over_tls/tls_host/tls_pubkey_sha256/tls_alpn/tls_no_session_ticket/tls_no_session_reuse/tls_fingerprint/tls_verification/tag/udp_relay/mieru_udp_over_tcp/fast_open/server_check_url/reality_base64_pubkey/reality_hex_shortid/others)* {
+    proxy.type = "mieru";
+    proxy.udp = proxy.udp === true && mieruUdpOverTcp;
+}
+
+hysteria2 = "hysteria2" equals address
+    (password/tls_host/tls_pubkey_sha256/tls_alpn/tls_no_session_ticket/tls_no_session_reuse/tls_fingerprint/tls_verification/udp_relay/download_bandwidth/hysteria2_obfs_password/port_hopping/port_hopping_interval/server_check_url/tag/others)* {
+    proxy.type = "hysteria2";
+    proxy.tls = true;
+}
+
 http = "http" equals address 
     (username/password/over_tls/tls_host/tls_pubkey_sha256/tls_alpn/tls_no_session_ticket/tls_no_session_reuse/tls_fingerprint/tls_verification/tag/fast_open/udp_relay/udp_over_tcp/server_check_url/reality_base64_pubkey/reality_hex_shortid/others)*{
     proxy.type = "http";
@@ -201,6 +214,36 @@ aead = comma "aead" equals flag:bool { proxy.aead = flag; }
 udp_relay = comma "udp-relay" equals flag:bool { proxy.udp = flag; }
 udp_over_tcp = comma "udp-over-tcp" equals flag:bool { throw new Error("UDP over TCP is not supported"); }
 udp_over_tcp_new = comma "udp-over-tcp" equals param:$[^=,]+ { if (param === "sp.v1") { proxy["udp-over-tcp"] = true; proxy["udp-over-tcp-version"] = 1; } else if (param === "sp.v2") { proxy["udp-over-tcp"] = true; proxy["udp-over-tcp-version"] = 2; } else if (param === "true") { proxy["_ssr_python_uot"] = true; } else { throw new Error("Invalid value for udp-over-tcp"); } }
+mieru_udp_over_tcp = comma "udp-over-tcp" equals raw:$[^,]* {
+    const value = raw.trim();
+    if (value !== "true" && value !== "false") {
+        throw new Error("mieru udp-over-tcp must be true or false");
+    }
+    mieruUdpOverTcp = value === "true";
+}
+
+download_bandwidth = comma "download-bandwidth" equals value:$[^,]+ { proxy.down = value.trim(); }
+hysteria2_obfs_password = comma type:("salamander"/"gecko") "-password" equals value:$((!next_parameter .)*) {
+    if (proxy.obfs && proxy.obfs !== type) {
+        throw new Error("QX Hysteria 2 cannot combine salamander-password and gecko-password");
+    }
+    const password = value.trim();
+    if (options.byteLength(password, "utf8") < 4) {
+        throw new Error("QX Hysteria 2 " + type + "-password must be at least 4 bytes");
+    }
+    proxy.obfs = type;
+    proxy["obfs-password"] = password;
+}
+port_hopping = comma "port-hopping" equals ports:$(hopping_port (comma hopping_port)*) {
+    proxy.ports = ports.replace(/\s/g, "");
+}
+hopping_port = [0-9]+ (_ "-" _ [0-9]+)?
+port_hopping_interval = comma "port-hopping-interval" equals interval:$[0-9]+ {
+    const seconds = Number(interval);
+    if (seconds >= 5 && seconds <= 3600) {
+        proxy["hop-interval"] = seconds;
+    }
+}
 
 fast_open = comma "fast-open" equals flag:bool { proxy.tfo = flag; }
 
@@ -265,7 +308,7 @@ reality_hex_shortid = comma "reality-hex-shortid" equals param:$[^=,]+ {
 }
 
 vless_flow = comma "vless-flow" equals param:$[^=,]+ { proxy["flow"] = param; }
-server_check_url = comma "server_check_url" equals param:$[^=,]+ { proxy["test-url"] = param; }
+server_check_url = comma "server_check_url" equals param:$[^,]+ { proxy["test-url"] = param.trim(); }
 
 uri = $[^,]+
 
@@ -282,7 +325,10 @@ export default function getParser() {
         const generated = peggy.generate(grammars);
         parser = {
             parse(input, options) {
-                const proxy = generated.parse(input, options);
+                const proxy = generated.parse(input, {
+                    ...options,
+                    byteLength: Buffer.byteLength,
+                });
                 const alpn = decodeQxAlpn(proxy['tls-alpn']);
                 if (alpn) proxy.alpn = alpn;
                 return proxy;

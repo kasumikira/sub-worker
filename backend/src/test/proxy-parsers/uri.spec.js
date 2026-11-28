@@ -441,6 +441,80 @@ describe('Proxy URI parser coverage', function () {
             expect(proxy.network).to.equal(undefined);
         });
 
+        it('parses Mieru simple links with paired ports and protocols', function () {
+            const proxies = parseAll(
+                [
+                    'mierus://user%3Aname:p%40ss@[2001:db8::1]?port=443&port=8000-8002&protocol=TCP&protocol=UDP&profile=Default&multiplexing=MULTIPLEXING_HIGH&handshake-mode=HANDSHAKE_NO_WAIT&traffic-pattern=CI%2B%2FAQ%3D%3D#Mieru%20Node',
+                    'mierus://user:pass@example.com?port=8443&port=8444&protocol=TCP&protocol=TCP&profile=Other+Node',
+                ].join('\n'),
+            );
+
+            expect(proxies.map((proxy) => proxy.name)).to.deep.equal([
+                'Mieru Node:443/TCP',
+                'Mieru Node:8000-8002/UDP',
+                'Other Node:8443/TCP',
+                'Other Node:8444/TCP',
+            ]);
+            expectSubset(proxies[0], {
+                type: 'mieru',
+                server: '2001:db8::1',
+                username: 'user:name',
+                password: 'p@ss',
+                port: 443,
+                transport: 'TCP',
+                udp: true,
+                multiplexing: 'MULTIPLEXING_HIGH',
+                'handshake-mode': 'HANDSHAKE_NO_WAIT',
+                'traffic-pattern': 'CI+/AQ==',
+            });
+            expectSubset(proxies[1], {
+                'port-range': '8000-8002',
+                transport: 'UDP',
+            });
+            expect(proxies[1]).not.to.have.property('port');
+        });
+
+        it('normalizes Mieru protocols and falls back to transport', function () {
+            const proxies = parseAll(
+                [
+                    'mierus://user:pass@example.com?udp=1&transport=tcp&port=44147&profile=🇰🇷kr_mieru&user-hint-is-mandatory=1',
+                    'mierus://user:pass@example.com?port=443&transport=tcp&protocol=udp&profile=Explicit',
+                ].join('\n'),
+            );
+
+            expect(proxies).to.have.length(2);
+            expectSubset(proxies[0], {
+                name: '🇰🇷kr_mieru',
+                port: 44147,
+                transport: 'TCP',
+            });
+            expectSubset(proxies[1], { transport: 'UDP' });
+        });
+
+        it('rejects an entire Mieru link if any port binding is invalid', function () {
+            const before =
+                'mierus://user:pass@example.com?port=1&protocol=TCP&profile=First';
+            const after =
+                'mierus://user:pass@example.com?port=65535-65535&protocol=UDP&profile=Last';
+
+            for (const [port, protocol] of [
+                ['443-', 'TCP'],
+                ['0', 'TCP'],
+                ['65536', 'UDP'],
+                ['0-443', 'TCP'],
+                ['443-65536', 'UDP'],
+                ['444-443', 'TCP'],
+                ['443', 'QUIC'],
+            ]) {
+                const invalid = `mierus://user:pass@example.com?port=443&port=${port}&protocol=TCP&protocol=${protocol}`;
+                const proxies = parseAll([before, invalid, after].join('\n'));
+                expect(
+                    proxies.map((proxy) => proxy.name),
+                    `${port}/${protocol}`,
+                ).to.deep.equal(['First', 'Last']);
+            }
+        });
+
         it('parses Hysteria URIs with fallback SNI and throughput fields', function () {
             const proxy = parseOne(
                 'hy://hysteria.example.com:8443?auth=token&peer=sni.example.com&alpn=h3,h2&mport=2000,3000&obfsParam=mask&upmbps=10&downmbps=20&insecure=1#Hysteria',
@@ -560,12 +634,14 @@ describe('Proxy URI parser coverage', function () {
             });
         });
 
-        it('rejects Hysteria2 salamander obfs without obfs-password', function () {
-            const proxies = parseAll(
-                'hy2://hy2-secret@hy2.example.com:443?obfs=salamander#Hy2%20Missing%20Password',
-            );
+        it('rejects Hysteria2 obfs modes without obfs-password', function () {
+            for (const obfs of ['salamander', 'gecko']) {
+                const proxies = parseAll(
+                    `hy2://hy2-secret@hy2.example.com:443?obfs=${obfs}#Hy2%20Missing%20Password`,
+                );
 
-            expect(proxies).to.deep.equal([]);
+                expect(proxies).to.be.empty;
+            }
         });
 
         it('parses TUIC URIs with colon-containing passwords and booleans', function () {

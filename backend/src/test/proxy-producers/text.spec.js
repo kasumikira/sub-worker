@@ -4,6 +4,7 @@ import { describe, it } from 'mocha';
 
 import $ from '@/core/app';
 import { ProxyUtils } from '@/core/proxy-utils';
+import Loon_Producer from '@/core/proxy-utils/producers/loon';
 import QX_Producer from '@/core/proxy-utils/producers/qx';
 import {
     expectSubset,
@@ -37,6 +38,190 @@ function captureErrors(fn) {
 }
 
 describe('Proxy text producers', function () {
+    it('round-trips documented Surge common policy parameters', function () {
+        const testUrl =
+            'https://check.example.com/status?list=one,port-hopping=3000';
+        const parameters = [
+            'interface = "en1"',
+            'allow-other-interface="false"',
+            'dns-follow-interface="true"',
+            'no-error-alert = false',
+            'ip-version = prefer-v6 ',
+            'hybrid="off"',
+            'tfo="false"',
+            'tos="0x88"',
+            'ecn="auto"',
+            'block-quic=adaptive',
+            `test-url="${testUrl}"`,
+            'test-timeout="0.75"',
+            'test-udp=check.example.com@192.0.2.53',
+            'underlying-proxy="Entry Group"',
+        ].join(',');
+        const expected = {
+            'interface-name': 'en1',
+            'allow-other-interface': false,
+            'dns-follow-interface': true,
+            'no-error-alert': 'false',
+            'ip-version': 'prefer-v6',
+            hybrid: 'off',
+            tfo: false,
+            tos: 136,
+            ecn: 'auto',
+            'block-quic': 'adaptive',
+            'test-url': testUrl,
+            'test-timeout': 0.75,
+            'test-udp': 'check.example.com@192.0.2.53',
+            'underlying-proxy': 'Entry Group',
+        };
+
+        for (const policy of [
+            'ss,example.com,443,encrypt-method=aes-128-gcm,password=secret',
+            'socks5,example.com,1080',
+            'socks5-tls,example.com,443',
+            'h2-connect,example.com,443',
+            `vless,example.com,443,username=${UUID}`,
+            'hysteria2,example.com,443,password=secret',
+            'external,exec="/usr/bin/ssh",local-port=1080,args="-o",args="Option=a,b",args="say \\"test\\""',
+        ]) {
+            const [proxy] = ProxyUtils.parse(`Proxy=${policy},${parameters}`);
+            expectSubset(proxy, expected, policy);
+            expect(proxy).to.not.have.property('ports');
+            const targets =
+                proxy.type === 'external'
+                    ? ['SurgeMac']
+                    : ['Surge', 'SurgeMac'];
+            for (const target of targets) {
+                const output = produceExternal(target, proxy);
+                expect(output).to.include(`,test-url="${testUrl}"`);
+                const [roundTripped] = ProxyUtils.parse(output);
+                expectSubset(roundTripped, expected, target);
+                if (proxy.type === 'external') {
+                    expect(roundTripped.args).to.deep.equal([
+                        '-o',
+                        'Option=a,b',
+                        'say \\"test\\"',
+                    ]);
+                }
+            }
+        }
+    });
+
+    it('applies Surge common parameters to Direct aliases', function () {
+        const proxyOnly = {
+            'no-error-alert': true,
+            ecn: true,
+            'underlying-proxy': 'Entry',
+        };
+        const [proxy] = ProxyUtils.parse(
+            'Alias=direct,interface=en1,dns-follow-interface=false,test-url=https://check.example.com,ecn=true',
+        );
+        expectSubset(proxy, {
+            type: 'direct',
+            'interface-name': 'en1',
+            'dns-follow-interface': false,
+            'test-url': 'https://check.example.com',
+        });
+        expect(proxy).to.not.have.property('ecn');
+
+        for (const target of ['Surge', 'SurgeMac']) {
+            const output = produceExternal(target, { ...proxy, ...proxyOnly });
+            expect(output).to.equal(
+                'Alias=direct,test-url=https://check.example.com,interface=en1,dns-follow-interface=false',
+            );
+        }
+    });
+
+    it('rejects Surge port hopping with an underlying proxy and out-of-range TOS', function () {
+        const proxies = ProxyUtils.parse(
+            [
+                'Hysteria=hysteria2,example.com,443,password=secret,port-hopping=443,2000-2005,underlying-proxy=Entry',
+                `TUIC=tuic-v5,example.com,443,uuid=${UUID},password=secret,port-hopping="443;2000-2005",underlying-proxy=Entry`,
+                "MASQUE=masque,example.com,443,password=secret,port-hopping='443;2000-2005',underlying-proxy=Entry",
+                'TOS=ss,example.com,443,encrypt-method=aes-128-gcm,password=secret,tos=0x100',
+            ].join('\n'),
+        );
+        expect(proxies.slice(0, 3).map(({ ports }) => ports)).to.deep.equal(
+            Array(3).fill('443,2000-2005'),
+        );
+        for (const target of ['Surge', 'SurgeMac']) {
+            const { result, errors } = captureErrors(() =>
+                ProxyUtils.produce(proxies, target, 'external'),
+            );
+            expect(result).to.equal('');
+            expect(errors).to.have.length(4);
+            for (const error of errors.slice(0, 3)) {
+                expect(error).to.include(
+                    'port-hopping cannot be combined with underlying-proxy',
+                );
+            }
+            expect(errors[3]).to.include(
+                'tos must be an integer between 0 and 255',
+            );
+        }
+    });
+
+    it('round-trips Surge ECN modes and converts them to Loon booleans', function () {
+        for (const [input, mode, loonEcn] of [
+            ['auto', 'auto', undefined],
+            ['on', 'on', true],
+            ['off', 'off', false],
+            ['true', true, true],
+            ['false', false, false],
+        ]) {
+            const proxies = ProxyUtils.parse(
+                `TCP=ss,example.com,443,encrypt-method=aes-128-gcm,password=secret,ecn=${input} ,tfo=true\n` +
+                    `QUIC=hysteria2,example.com,443,password=secret,ecn=${input}`,
+            );
+            expect(proxies.map((proxy) => proxy.ecn)).to.deep.equal([
+                mode,
+                mode,
+            ]);
+            expect(proxies[0].tfo).to.equal(true);
+
+            for (const target of ['Surge', 'SurgeMac']) {
+                const output = produceExternal(target, proxies);
+                expect(
+                    ProxyUtils.parse(output).map((proxy) => proxy.ecn),
+                ).to.deep.equal([mode, mode]);
+            }
+
+            const [tcp, quic] = produceExternal('Loon', proxies).split('\n');
+            expect(tcp).not.to.include(',ecn=');
+            if (loonEcn === undefined) {
+                expect(quic).not.to.include(',ecn=');
+            } else {
+                expect(quic).to.include(`,ecn=${loonEcn}`);
+            }
+            const mihomo = produceInternal('Mihomo', proxies);
+            expect(mihomo).to.have.lengthOf(2);
+            for (const proxy of mihomo) {
+                expect(proxy).not.to.have.property('ecn');
+            }
+        }
+    });
+
+    it('applies ECN quick settings to TCP proxies and accepts saved toggles', async function () {
+        const raw =
+            'TCP=ss,example.com,443,encrypt-method=aes-128-gcm,password=secret,ecn=off';
+        for (const [ecn, expected] of [
+            ['DEFAULT', 'off'],
+            ['auto', 'auto'],
+            ['on', 'on'],
+            ['off', 'off'],
+            ['ENABLED', true],
+            ['DISABLED', false],
+        ]) {
+            const [proxy] = await ProxyUtils.process(
+                ProxyUtils.parse(raw),
+                [{ type: 'Quick Setting Operator', args: { ecn } }],
+                'Surge',
+            );
+            expect(produceExternal('Surge', proxy)).to.include(
+                `,ecn=${expected}`,
+            );
+        }
+    });
+
     it('decodes and preserves Quantumult X tls-alpn forms', function () {
         for (const tlsAlpn of [
             '02683208687474702f312e31',
@@ -53,30 +238,54 @@ describe('Proxy text producers', function () {
         }
     });
 
-    it('encodes canonical ALPN for every Quantumult X TLS producer', function () {
+    it('round-trips ALPN and TLS session options for every Quantumult X TLS protocol', function () {
         const credentials = {
             ss: { cipher: 'aes-128-gcm', password: 'secret' },
             trojan: { password: 'secret' },
             vmess: { cipher: 'none', uuid: UUID },
             vless: { uuid: UUID },
             anytls: { password: 'secret' },
+            mieru: { username: 'user', password: 'secret' },
+            hysteria2: { password: 'secret' },
             http: {},
             socks5: {},
         };
 
         for (const [type, fields] of Object.entries(credentials)) {
+            const alpn = type === 'hysteria2' ? ['h3'] : ['h2', 'http/1.1'];
+            const tlsAlpn =
+                type === 'hysteria2' ? '026833' : '02683208687474702f312e31';
             const output = produceExternal('QX', {
                 type,
                 name: type,
                 server: 'example.com',
                 port: 443,
                 tls: true,
-                alpn: ['h2', 'http/1.1'],
+                alpn,
+                'tls-no-session-ticket': true,
+                'tls-no-session-reuse': false,
                 ...fields,
             });
 
-            expect(output).to.include('tls-alpn=02683208687474702f312e31');
+            expectSubset(
+                ProxyUtils.parse(output)[0],
+                {
+                    type,
+                    alpn,
+                    'tls-alpn': tlsAlpn,
+                    'tls-no-session-ticket': true,
+                    'tls-no-session-reuse': false,
+                },
+                type,
+            );
         }
+    });
+
+    it('round-trips TLS options for Quantumult X Shadowsocks WSS', function () {
+        const raw =
+            'shadowsocks=example.com:443,method=aes-128-gcm,password=secret,obfs=wss,tls-alpn=026832,tls-no-session-ticket=true,tls-no-session-reuse=false,udp-relay=true,tag=SS WSS';
+
+        expect(produceExternal('QX', ProxyUtils.parse(raw))).to.equal(raw);
     });
 
     it('uses name-cert-verify as Quantumult X tls-verification', function () {
@@ -466,6 +675,204 @@ describe('Proxy text producers', function () {
         expect(output).to.equal(raw);
     });
 
+    it('round-trips Quantumult X mieru TCP, TLS and Reality nodes', function () {
+        const tcp = 'mieru=example.com:8964, username=name, password=pwd';
+        const tls =
+            'mieru=example.com:443, username=name, password=pwd, over-tls=true, tls-host=apple.com';
+        const udp = 'udp-relay=true, udp-over-tcp=true';
+        const proxies = ProxyUtils.parse(
+            [
+                `${tcp}, tag=mieru-plain`,
+                `${tcp}, udp-relay=true, tag=mieru-relay-only`,
+                `${tcp}, udp-over-tcp=true, tag=mieru-uot-only`,
+                `${tcp}, fast-open=false, ${udp}, tag=mieru-udp`,
+                `${tls}, tls-verification=true, udp-relay=true, udp-over-tcp=false, tag=mieru-tls`,
+                `${tls}, reality-base64-pubkey=pubkey, reality-hex-shortid=0123456789abcdef, ${udp}, tag=mieru-reality`,
+            ].join('\n'),
+        );
+
+        expect(proxies.map((proxy) => proxy.udp)).to.deep.equal([
+            false,
+            false,
+            false,
+            true,
+            false,
+            true,
+        ]);
+        expectSubset(proxies[5], {
+            type: 'mieru',
+            username: 'name',
+            password: 'pwd',
+            tls: true,
+            sni: 'apple.com',
+            'reality-opts': {
+                'public-key': 'pubkey',
+                'short-id': '0123456789abcdef',
+            },
+        });
+
+        const output = produceExternal('QX', proxies);
+        expect(output).to.include('udp-relay=true,udp-over-tcp=true');
+        expect(ProxyUtils.parse(output)).to.deep.equal(proxies);
+    });
+
+    it('rejects invalid Quantumult X mieru udp-over-tcp values', function () {
+        for (const value of ['sp.v1', 'sp.v2', '1', 'true=invalid', '']) {
+            const input = `mieru=example.com:8964,username=name,password=pwd,udp-relay=true,udp-over-tcp=${value},tag=mieru`;
+            const { result, errors } = captureErrors(() =>
+                ProxyUtils.parse(input),
+            );
+
+            expect(result, JSON.stringify(value)).to.be.empty;
+            expect(errors).to.have.length(1);
+        }
+    });
+
+    it('round-trips Quantumult X Hysteria 2 options', function () {
+        const [proxy] = ProxyUtils.parse(
+            'hysteria2=example.com:443, password=pwd, port-hopping=443, 20000-50000, port-hopping-interval=30, salamander-password=obfskey, tls-host=apple.com, tls-verification=false, download-bandwidth=100, udp-relay=false, tag=hy2',
+        );
+
+        expectSubset(proxy, {
+            type: 'hysteria2',
+            name: 'hy2',
+            server: 'example.com',
+            port: 443,
+            password: 'pwd',
+            tls: true,
+            sni: 'apple.com',
+            'skip-cert-verify': true,
+            udp: false,
+            ports: '443,20000-50000',
+            'hop-interval': 30,
+            obfs: 'salamander',
+            'obfs-password': 'obfskey',
+            down: '100',
+        });
+        const output =
+            'hysteria2=example.com:443,password=pwd,port-hopping=443,20000-50000,port-hopping-interval=30,salamander-password=obfskey,tls-host=apple.com,tls-verification=false,download-bandwidth=100,udp-relay=false,tag=hy2';
+        expect(produceExternal('QX', proxy)).to.equal(output);
+        expect(
+            produceExternal('QX', { ...proxy, ports: '443;20000-50000' }),
+        ).to.equal(output);
+        expect(
+            produceExternal('QX', {
+                ...proxy,
+                ports: ' ',
+                'hop-interval': ' ',
+            }),
+        ).not.to.include(',port-hopping');
+    });
+
+    it('round-trips Quantumult X Hysteria 2 Gecko obfuscation', function () {
+        const raw =
+            'hysteria2=example.com:443,password=pwd,gecko-password=obfskey,tls-host=apple.com,tls-verification=true,udp-relay=true,tag=hy2-05';
+        const [proxy] = ProxyUtils.parse(raw);
+
+        expectSubset(proxy, { obfs: 'gecko', 'obfs-password': 'obfskey' });
+        expect(produceExternal('QX', proxy)).to.equal(raw);
+    });
+
+    it('rejects short Quantumult X Hysteria 2 obfuscation passwords on import', function () {
+        for (const obfs of ['gecko', 'salamander']) {
+            const prefix = `hysteria2=example.com:443,password=pwd,${obfs}-password=`;
+            const input = ['x', '中', '', '中x']
+                .map((key) => `${prefix}${key},tag=hy2`)
+                .join('\n');
+            const { result } = captureErrors(() => ProxyUtils.parse(input));
+
+            expect(result).to.have.length(1);
+            expectSubset(result[0], { obfs, 'obfs-password': '中x' });
+        }
+    });
+
+    it('requires Quantumult X Hysteria 2 obfuscation passwords to be at least 4 bytes', function () {
+        for (const obfs of ['gecko', 'salamander']) {
+            const proxies = ['x', '中', '中x'].map((obfsPassword) => ({
+                type: 'hysteria2',
+                name: 'hy2',
+                server: 'example.com',
+                port: 443,
+                password: 'pwd',
+                obfs,
+                'obfs-password': obfsPassword,
+            }));
+            const { result, errors } = captureErrors(() =>
+                produceExternal('QX', proxies),
+            );
+
+            expect(result).to.equal(
+                `hysteria2=example.com:443,password=pwd,${obfs}-password=中x,tag=hy2`,
+            );
+            expect(errors).to.have.length(2);
+        }
+    });
+
+    it('rejects Quantumult X Hysteria 2 Gecko export without a key', function () {
+        const proxy = {
+            type: 'hysteria2',
+            name: 'hy2',
+            server: 'example.com',
+            port: 443,
+            password: 'pwd',
+            obfs: 'gecko',
+        };
+        const { result, errors } = captureErrors(() =>
+            ProxyUtils.produce([proxy], 'QX', 'external'),
+        );
+
+        expect(result).to.equal('');
+        expect(errors[0]).to.include('requires gecko-password');
+    });
+
+    it('rejects combined Gecko and Salamander in Quantumult X Hysteria 2', function () {
+        const { result } = captureErrors(() =>
+            ProxyUtils.parse(
+                'hysteria2=example.com:443,password=pwd,salamander-password=obfskey,gecko-password=obfskey,udp-relay=true,tag=hy2',
+            ),
+        );
+
+        expect(result).to.be.empty;
+    });
+
+    it('limits Quantumult X Hysteria 2 port hopping intervals to 5–3600 seconds', function () {
+        const prefix =
+            'hysteria2=example.com:443,password=pwd,port-hopping=2000-3000';
+        for (const interval of [1, 5, 3600, 3601]) {
+            const option = `port-hopping-interval=${interval}`;
+            const [proxy] = ProxyUtils.parse(`${prefix},${option},tag=hy2`);
+            const output = produceExternal('QX', {
+                ...proxy,
+                'hop-interval': interval,
+            });
+
+            expect(output).to.include(',port-hopping=2000-3000,');
+            if (interval === 5 || interval === 3600) {
+                expect(proxy['hop-interval']).to.equal(interval);
+                expect(output).to.include(`,${option},`);
+            } else {
+                expect(proxy).not.to.have.property('hop-interval');
+                expect(output).not.to.include(',port-hopping-interval=');
+            }
+        }
+    });
+
+    it('preserves TLS pins and the check URL in Quantumult X Hysteria 2', function () {
+        const fingerprint = 'ab'.repeat(32);
+        const pubkey = 'cd'.repeat(32);
+        const checkUrl = 'https://check.example.com/ping?status=204';
+        const raw = `hysteria2=example.com:443,password=pwd,tls-host=peer.example.com,tls-pubkey-sha256=${pubkey},tls-cert-sha256=${fingerprint},tls-verification=verify.example.com,udp-relay=true,server_check_url=${checkUrl},tag=hy2`;
+        const [proxy] = ProxyUtils.parse(raw);
+
+        expectSubset(proxy, {
+            'tls-fingerprint': fingerprint,
+            'tls-pubkey-sha256': pubkey,
+            'name-cert-verify': 'verify.example.com',
+            'test-url': checkUrl,
+        });
+        expect(produceExternal('QX', proxy)).to.equal(raw);
+    });
+
     it('round-trips Loon Tailscale with optional authentication and explicit settings', function () {
         const proxies = ProxyUtils.parse(
             [
@@ -532,6 +939,7 @@ describe('Proxy text producers', function () {
             'Trojan=trojan,trojan.example.com,443,"secret"',
             'AnyTLS=anytls,anytls.example.com,443,"secret"',
             'Hysteria2=hysteria2,hy2.example.com,443,"secret"',
+            'Snell=snell,snell.example.com,6160,psk=secret,version=4',
             'HTTP=http,http.example.com,8080',
             'HTTPS=https,https.example.com,443',
             'SOCKS5=socks5,socks.example.com,1080',
@@ -615,7 +1023,730 @@ describe('Proxy text producers', function () {
         }
     });
 
-    it('produces Loon VLESS reality websocket lines', function () {
+    it('round-trips Loon XHTTP for VLESS, VMess AEAD, and Trojan', function () {
+        const input = [
+            `VLESS=vless,example.com,80,"${UUID}",transport=xhttp,path="/xhttp?route=a,b",host=cdn.example.com,over-tls=false,alpn=http/1.1,xhttp-mode=packet-up,xhttp-max-post-bytes=0,xhttp-min-post-interval-ms=30-60,xhttp-padding-obfs-mode=false,xhttp-session-id-table=Base62,xhttp-session-id-length=16-32,xhttp-header="X-Trace: a, b",xhttp-header="X-Origin: https://example.org",udp=true`,
+            `VMess=vmess,example.com,443,aes-128-gcm,"${UUID}",transport=xhttp,path=/xhttp?username=test,over-tls=true,alpn=h3,xhttp-mode=stream-up,xhttp-no-grpc-header=true,alterId=0`,
+            'Trojan=trojan,example.com,443,"dGVzdA==",transport=xhttp,sni=cdn.example.com,public-key=pubkey,short-id="",alpn=h2,xhttp-mode=stream-one',
+        ].join('\n');
+        const proxies = ProxyUtils.parse(input);
+        expect(proxies.map(({ type }) => type)).to.deep.equal([
+            'vless',
+            'vmess',
+            'trojan',
+        ]);
+        expect(proxies.every(({ network }) => network === 'xhttp')).to.be.true;
+        const [vless, vmess, trojan] = proxies;
+        expectSubset(vless, {
+            tls: false,
+            alpn: ['http/1.1'],
+            udp: true,
+            'xhttp-opts': {
+                path: '/xhttp?route=a,b',
+                host: 'cdn.example.com',
+                mode: 'packet-up',
+                'sc-max-each-post-bytes': 0,
+                'sc-min-posts-interval-ms': '30-60',
+                'x-padding-obfs-mode': false,
+                'session-table': 'Base62',
+                'session-length': '16-32',
+                headers: {
+                    'X-Trace': 'a, b',
+                    'X-Origin': 'https://example.org',
+                },
+            },
+        });
+        expectSubset(vmess, {
+            alterId: 0,
+            tls: true,
+            alpn: ['h3'],
+            'xhttp-opts': { mode: 'stream-up', 'no-grpc-header': true },
+        });
+        expectSubset(trojan, {
+            password: 'dGVzdA==',
+            tls: true,
+            'reality-opts': { 'public-key': 'pubkey', 'short-id': '' },
+            'xhttp-opts': { mode: 'stream-one' },
+        });
+
+        const output = produceExternal('Loon', proxies);
+        expect(output).to.include(',xhttp-header="X-Trace: a, b"');
+        expect(output).to.include(
+            ',xhttp-header="X-Origin: https://example.org"',
+        );
+        expect(output).not.to.include(',block-quic=');
+        expect(ProxyUtils.parse(output)).to.deep.equal(proxies);
+    });
+
+    it('round-trips Loon XHTTP XMUX and independent download options', function () {
+        const input = [
+            'Split=trojan,upload.example.com,443,"secret",transport=xhttp,alpn=h3,xhttp-mode=stream-up',
+            'xhttp-xmux-max-connections=3,xhttp-xmux-http-max-requests=600-900,xhttp-xmux-http-keepalive-secs=0',
+            'xhttp-download-server=download.example.com,xhttp-download-port=8443,xhttp-download-host=cdn.example.com,xhttp-download-path="/down?route=a,b"',
+            'xhttp-download-alpn=h2,xhttp-download-over-tls=true,xhttp-download-sni=peer.example.com,xhttp-download-skip-cert-verify=false,xhttp-download-tls-profile=chrome,xhttp-download-tls-cert-sha256=cert-pin,xhttp-download-tls-pubkey-sha256=key-pin',
+            'xhttp-download-xmux-max-concurrency=8-16,xhttp-download-xmux-max-reuse-times=0,xhttp-download-xmux-http-max-reusable-secs=1800-3000,xhttp-download-xmux-http-keepalive-secs=-1',
+            'xhttp-download-padding-bytes=100-300,xhttp-download-padding-obfs-mode=false,xhttp-download-session-id-placement=header,xhttp-download-session-id-key=X-Session',
+            'xhttp-download-header="X-Trace: a,b",xhttp-download-header="X-Origin: https://example.org"',
+        ].join(',');
+        const [proxy] = ProxyUtils.parse(input);
+        expectSubset(proxy, {
+            alpn: ['h3'],
+            'xhttp-opts': {
+                'reuse-settings': {
+                    'max-connections': '3',
+                    'h-max-request-times': '600-900',
+                    'h-keep-alive-period': 0,
+                },
+                'download-settings': {
+                    server: 'download.example.com',
+                    port: 8443,
+                    host: 'cdn.example.com',
+                    path: '/down?route=a,b',
+                    alpn: ['h2'],
+                    tls: true,
+                    servername: 'peer.example.com',
+                    'skip-cert-verify': false,
+                    'client-fingerprint': 'chrome',
+                    fingerprint: 'cert-pin',
+                    'tls-pubkey-sha256': 'key-pin',
+                    'reuse-settings': {
+                        'max-concurrency': '8-16',
+                        'c-max-reuse-times': '0',
+                        'h-max-reusable-secs': '1800-3000',
+                        'h-keep-alive-period': -1,
+                    },
+                    'x-padding-bytes': '100-300',
+                    'x-padding-obfs-mode': false,
+                    'session-placement': 'header',
+                    'session-key': 'X-Session',
+                    headers: {
+                        'X-Trace': 'a,b',
+                        'X-Origin': 'https://example.org',
+                    },
+                },
+            },
+        });
+        const output = produceExternal('Loon', proxy);
+        expect(output).to.include(',xhttp-download-header="X-Trace: a,b"');
+        expect(ProxyUtils.parse(output)).to.deep.equal([proxy]);
+
+        const [reality] = ProxyUtils.parse(
+            `Split=vless,upload.example.com,443,"${UUID}",transport=xhttp,over-tls=true,alpn=h3,xhttp-download-server=download.example.com,xhttp-download-port=8443,xhttp-download-sni=peer.example.com,xhttp-download-public-key="public-key",xhttp-download-short-id=""`,
+        );
+        expectSubset(reality['xhttp-opts']['download-settings'], {
+            tls: true,
+            'reality-opts': { 'public-key': 'public-key', 'short-id': '' },
+        });
+        expect(
+            ProxyUtils.parse(produceExternal('Loon', reality)),
+        ).to.deep.equal([reality]);
+    });
+
+    it('maps REALITY ML-KEM independently for Loon XHTTP uploads and downloads', function () {
+        const flag = 'support-x25519mlkem768';
+        const input = `Split=vless,upload.example.com,443,"${UUID}",transport=xhttp,over-tls=true,xhttp-download-server=down.example.com,xhttp-download-over-tls=true`;
+        for (const [upload, download, uploadFlag, downloadFlag] of [
+            [undefined, 'chrome147', undefined, true],
+            ['chrome', 'safari-ios-26', undefined, true],
+            ['chrome147', 'chrome', true, undefined],
+        ]) {
+            const line = [
+                input,
+                upload && `public-key=up-key,tls-profile=${upload}`,
+                `xhttp-download-tls-profile=${download}`,
+            ]
+                .filter(Boolean)
+                .join(',');
+            const [tlsOnly] = ProxyUtils.parse(line);
+            expect(
+                tlsOnly['xhttp-opts']['download-settings'],
+            ).not.to.have.property('reality-opts');
+
+            const [proxy] = ProxyUtils.parse(
+                `${line},xhttp-download-public-key=down-key`,
+            );
+            const [mihomo] = produceInternal('Mihomo', proxy);
+            const downloadReality =
+                mihomo['xhttp-opts']['download-settings']['reality-opts'];
+            expect(mihomo['reality-opts']?.[flag]).to.equal(uploadFlag);
+            expect(downloadReality[flag]).to.equal(downloadFlag);
+
+            downloadReality[flag] = false;
+            const [reparsed] = ProxyUtils.parse(JSON.stringify(mihomo));
+            expect(
+                reparsed['xhttp-opts']['download-settings']['reality-opts'][
+                    flag
+                ],
+            ).to.equal(false);
+        }
+    });
+
+    it('validates Loon XHTTP XMUX quotas per endpoint', function () {
+        const input = `Split=vless,upload.example.com,443,"${UUID}",transport=xhttp,over-tls=true,alpn=h2,xhttp-mode=stream-up`;
+        const split = `${input},xhttp-download-server=download.example.com,xhttp-download-port=8443,xhttp-download-over-tls=true,xhttp-download-alpn=h2`;
+        for (const [line, prefix, concurrency, connections] of [
+            [input, 'xhttp-xmux', '8', '3'],
+            [split, 'xhttp-download-xmux', '0-8', '3-4'],
+        ]) {
+            const proxies = ProxyUtils.parse(
+                `${line},${prefix}-max-concurrency=${concurrency},${prefix}-max-connections=${connections}`,
+            );
+            expect(proxies).to.have.length(1);
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Loon', proxies),
+            );
+            expect(result).to.be.empty;
+            expect(errors[0]).to.include(
+                `${prefix}-max-concurrency and ${prefix}-max-connections`,
+            );
+
+            const valid = ProxyUtils.parse(
+                `${line},${prefix}-max-concurrency=0,${prefix}-max-connections=${connections}`,
+            );
+            expect(produceExternal('Loon', valid)).to.include(
+                `,${prefix}-max-connections=${connections}`,
+            );
+        }
+    });
+
+    it('validates the range of every Loon XHTTP XMUX field on both endpoints', function () {
+        const input = `Split=vless,upload.example.com,443,"${UUID}",transport=xhttp,over-tls=true,alpn=h2,xhttp-mode=stream-up`;
+        const split = `${input},xhttp-download-server=download.example.com,xhttp-download-port=8443,xhttp-download-over-tls=true,xhttp-download-alpn=h2`;
+        for (const [line, prefix] of [
+            [input, 'xhttp-xmux'],
+            [split, 'xhttp-download-xmux'],
+        ]) {
+            for (const [key, invalid, valid] of [
+                ['max-concurrency', '8-2', '8-16'],
+                ['max-connections', '-1', '3'],
+                ['max-reuse-times', 'invalid', '0'],
+                ['http-max-requests', '1.5', '600-900'],
+                ['http-max-reusable-secs', '-5', '1800'],
+                ['http-keepalive-secs', '-2', '-1'],
+                ['http-keepalive-secs', '10-20', '0'],
+                ['http-keepalive-secs', '1.5', '15'],
+            ]) {
+                const option = `${prefix}-${key}`;
+                const proxies = ProxyUtils.parse(
+                    `${line},${option}=${invalid}`,
+                );
+                expect(proxies).to.have.length(1);
+                const { result, errors } = captureErrors(() =>
+                    produceInternal('Loon', proxies),
+                );
+                expect(result, option).to.be.empty;
+                expect(errors[0]).to.include(`${option} must be`);
+
+                const accepted = ProxyUtils.parse(`${line},${option}=${valid}`);
+                expect(produceExternal('Loon', accepted)).to.include(
+                    `,${option}=${valid}`,
+                );
+            }
+        }
+    });
+
+    it('uses a non-blank server for Loon XHTTP downloads', function () {
+        const input = `Split=vless,upload.example.com,443,"${UUID}",transport=xhttp,xhttp-download-port=8443`;
+        for (const [option, expected] of [
+            ['', 'upload.example.com'],
+            [',xhttp-download-server=""', 'upload.example.com'],
+            [',xhttp-download-server="  "', 'upload.example.com'],
+            [
+                ',xhttp-download-server=" download.example.com "',
+                'download.example.com',
+            ],
+        ]) {
+            const proxies = ProxyUtils.parse(input + option);
+            expect(produceExternal('Loon', proxies)).to.include(
+                `,xhttp-download-server=${expected}`,
+            );
+        }
+
+        const [proxy] = ProxyUtils.parse(`${input},xhttp-download-server=" "`);
+        const { result, errors } = captureErrors(() =>
+            produceInternal('Loon', { ...proxy, server: ' ' }),
+        );
+        expect(result).to.be.empty;
+        expect(errors[0]).to.include(
+            'xhttp-download-server requires a server address',
+        );
+    });
+
+    it('validates Loon XHTTP download port boundaries on export', function () {
+        const input = `Split=vless,upload.example.com,443,"${UUID}",transport=xhttp,xhttp-download-server=download.example.com`;
+        for (const port of [0, -1, 70000, 443.5, 'invalid']) {
+            const proxies = ProxyUtils.parse(
+                `${input},xhttp-download-port=${port}`,
+            );
+            expect(proxies).to.have.length(1);
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Loon', proxies),
+            );
+            expect(result).to.be.empty;
+            expect(errors[0]).to.include(
+                'xhttp-download-port must be an integer',
+            );
+        }
+
+        for (const port of [1, 65535]) {
+            const proxies = ProxyUtils.parse(
+                `${input},xhttp-download-port=${port}`,
+            );
+            expect(produceExternal('Loon', proxies)).to.include(
+                `,xhttp-download-port=${port}`,
+            );
+        }
+        expect(produceExternal('Loon', ProxyUtils.parse(input))).to.include(
+            ',xhttp-download-port=443',
+        );
+    });
+
+    it('enforces Loon XHTTP main ALPN by security', function () {
+        const proxy = {
+            type: 'vless',
+            name: 'Main',
+            server: 'example.com',
+            port: 443,
+            uuid: UUID,
+            network: 'xhttp',
+        };
+        const reality = { 'reality-opts': { 'public-key': 'A'.repeat(43) } };
+        const trojan = { type: 'trojan', password: 'secret' };
+        for (const [settings, reason] of [
+            [{ tls: false, alpn: ['h2'] }, 'XHTTP alpn must be http/1.1'],
+            [{ type: 'vmess', alpn: ['h3'] }, 'XHTTP alpn must be http/1.1'],
+            [{ ...reality, tls: true, alpn: ['h3'] }, 'XHTTP alpn must be h2'],
+            [{ ...trojan, ...reality, alpn: ['h3'] }, 'XHTTP alpn must be h2'],
+            [{ tls: true, alpn: ['h2', 'h3'] }, 'only a single ALPN'],
+        ]) {
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Loon', { ...proxy, ...settings }),
+            );
+            expect(result).to.be.empty;
+            expect(errors[0]).to.include(reason);
+        }
+
+        expect(
+            produceExternal('Loon', { ...proxy, tls: false }),
+        ).not.to.include(',alpn=');
+        expect(
+            produceExternal('Loon', { ...proxy, ...trojan, alpn: ['h3'] }),
+        ).to.include(',alpn="h3"');
+    });
+
+    it('rejects incomplete REALITY for Loon XHTTP downloads', function () {
+        const key = 'A'.repeat(43);
+        const options =
+            'transport=xhttp,xhttp-mode=stream-up,xhttp-download-server=down.example.com,xhttp-download-port=8443';
+        for (const input of [
+            `Split=vless,example.com,443,"${UUID}",over-tls=true,public-key="${key}",${options},xhttp-download-public-key=""`,
+            `Split=vmess,example.com,443,aes-128-gcm,"${UUID}",alterId=0,${options},xhttp-download-public-key=" "`,
+            `Split=trojan,example.com,443,"secret",${options},xhttp-download-short-id=08`,
+        ]) {
+            const proxies = ProxyUtils.parse(input);
+            expect(proxies).to.have.length(1);
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Loon', proxies),
+            );
+            expect(result).to.be.empty;
+            expect(errors[0]).to.include(
+                'Loon XHTTP download REALITY requires a non-blank public-key',
+            );
+        }
+    });
+
+    it('enforces Loon XHTTP download ALPN and certificate settings by security', function () {
+        const reality = { 'reality-opts': { 'public-key': 'A'.repeat(43) } };
+        const realityConflict = 'conflicts with xhttp-download-over-tls=false';
+        const certificateConflict = 'or TLS certificate fingerprints';
+        const makeProxy = (settings) => ({
+            type: 'vless',
+            name: 'Split',
+            server: 'upload.example.com',
+            port: 443,
+            uuid: UUID,
+            network: 'xhttp',
+            tls: true,
+            'xhttp-opts': {
+                mode: 'stream-up',
+                'download-settings': {
+                    server: 'download.example.com',
+                    port: 8443,
+                    ...settings,
+                },
+            },
+        });
+        for (const [settings, reason] of [
+            [{ ...reality, tls: false }, realityConflict],
+            [{ ...reality, tls: 'false' }, realityConflict],
+            [{ alpn: ['h2', 'http/1.1'] }, 'a single ALPN'],
+            [{ alpn: ['h2,http/1.1'] }, 'a single ALPN'],
+            [{ alpn: 'h2,http/1.1' }, 'a single ALPN'],
+            [{ alpn: ['h2'] }, 'xhttp-download-alpn must be http/1.1'],
+            [
+                { tls: false, alpn: ['h3'] },
+                'xhttp-download-alpn must be http/1.1',
+            ],
+            [{ ...reality, alpn: ['h3'] }, 'xhttp-download-alpn must be h2'],
+            [
+                { tls: true, alpn: ['unknown'] },
+                'xhttp-download-alpn must be http/1.1 or h2 or h3',
+            ],
+            [{ ...reality, 'skip-cert-verify': true }, certificateConflict],
+            [{ ...reality, 'skip-cert-verify': 'true' }, certificateConflict],
+            [{ ...reality, fingerprint: 'cert-pin' }, certificateConflict],
+            [
+                { ...reality, 'tls-fingerprint': 'cert-pin' },
+                certificateConflict,
+            ],
+            [
+                { ...reality, 'tls-pubkey-sha256': 'key-pin' },
+                certificateConflict,
+            ],
+        ]) {
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Loon', makeProxy(settings)),
+            );
+            expect(result).to.be.empty;
+            expect(errors[0]).to.include(reason);
+        }
+
+        for (const settings of [
+            { alpn: ['http/1.1'] },
+            { tls: true, alpn: ['http/1.1'] },
+            { tls: true, alpn: ['h2'] },
+            { tls: 'true', alpn: ['h3'] },
+            { ...reality, alpn: ['h2'] },
+        ]) {
+            expect(produceExternal('Loon', makeProxy(settings))).to.include(
+                `,xhttp-download-alpn=${settings.alpn[0]}`,
+            );
+        }
+
+        const output = produceExternal(
+            'Loon',
+            makeProxy({
+                ...reality,
+                'skip-cert-verify': false,
+                fingerprint: '',
+                'tls-pubkey-sha256': '',
+            }),
+        );
+        expect(output).to.include(',xhttp-download-public-key=');
+        expect(output).not.to.match(
+            /xhttp-download-(skip-cert-verify|tls-cert-sha256|tls-pubkey-sha256)=/,
+        );
+    });
+
+    it('requires TCP with TLS or REALITY for Loon VLESS Vision without encryption', function () {
+        const proxy = {
+            type: 'vless',
+            name: 'Vision',
+            server: 'example.com',
+            port: 443,
+            uuid: UUID,
+            flow: 'xtls-rprx-vision',
+        };
+        for (const settings of [
+            { network: 'ws', tls: true },
+            { network: 'http', tls: true, encryption: 'none' },
+            { network: 'xhttp', tls: true },
+            { network: 'tcp', tls: false },
+            { tls: 'false', flow: 'xtls-rprx-vision-udp443' },
+        ]) {
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Loon', { ...proxy, ...settings }),
+            );
+            expect(result).to.be.empty;
+            expect(errors[0]).to.include('requires TCP with TLS or REALITY');
+        }
+
+        for (const settings of [
+            { network: 'tcp', tls: true },
+            { 'reality-opts': { 'public-key': 'A'.repeat(43) } },
+        ]) {
+            expect(
+                produceExternal('Loon', { ...proxy, ...settings }),
+            ).to.include(',flow=xtls-rprx-vision');
+        }
+    });
+
+    it('rejects incomplete REALITY in the Loon VLESS Vision producer', function () {
+        const { produce } = Loon_Producer();
+        const proxy = {
+            type: 'vless',
+            name: 'Vision',
+            server: 'example.com',
+            port: 443,
+            uuid: UUID,
+            network: 'tcp',
+            tls: false,
+            flow: 'xtls-rprx-vision',
+        };
+        for (const reality of [
+            { 'short-id': '08' },
+            { 'public-key': '' },
+            { 'public-key': ' \t ' },
+        ]) {
+            expect(() =>
+                produce({ ...proxy, 'reality-opts': reality }, 'external'),
+            ).to.throw('Loon VLESS REALITY requires a non-blank public-key');
+        }
+    });
+
+    it('converts Loon VLESS Encryption and Vision through VLESS links', function () {
+        const keys = `${'A'.repeat(43)}.${'B'.repeat(43)}`;
+        const padding = '100-128-128.75-0-111.50-0-3333';
+        for (const [network, mode, rtt] of [
+            ['tcp', 'native'],
+            ['ws', 'xorpub', '1rtt'],
+            ['http', 'random', '0rtt'],
+            ['xhttp', 'native', '1rtt'],
+        ]) {
+            const flow = 'xtls-rprx-vision-udp443';
+            const rttOption = rtt ? `,encryption-rtt=${rtt}` : '';
+            const expectedRtt = rtt ?? '0rtt';
+            const [proxy] = ProxyUtils.parse(
+                `Encrypted=vless,example.com,443,"${UUID}",transport=${network},flow=${flow},encryption-mode=${mode},encryption-public-keys="${keys}",encryption-padding=${padding}${rttOption}`,
+            );
+            const encryption = `mlkem768x25519plus.${mode}.${expectedRtt}.${padding}.${keys}`;
+            expect(proxy).to.include({ network, encryption, flow });
+
+            const uri = produceExternal('URI', proxy);
+            const output = produceExternal('Loon', ProxyUtils.parse(uri));
+            expect(output).to.include(`,encryption-mode=${mode}`);
+            expect(output).to.include(`,encryption-rtt=${expectedRtt}`);
+            expect(output.split(',')).to.include(
+                `encryption-public-keys=${keys}`,
+            );
+            expect(output).to.include(`,encryption-padding=${padding}`);
+            expect(ProxyUtils.parse(output)[0]).to.include({
+                network,
+                encryption,
+                flow,
+            });
+        }
+    });
+
+    it('exports unquoted Loon VLESS Encryption public keys with independent XHTTP download', function () {
+        const key = 'A'.repeat(43);
+        const extra = encodeURIComponent(
+            JSON.stringify({
+                downloadSettings: {
+                    address: 'download.example.com',
+                    port: 8443,
+                    security: 'tls',
+                },
+            }),
+        );
+        const proxies = ProxyUtils.parse(
+            `vless://${UUID}@upload.example.com:443?type=xhttp&mode=stream-up&security=tls&encryption=mlkem768x25519plus.native.0rtt.${key}&extra=${extra}#Split`,
+        );
+        const output = produceExternal('Loon', proxies);
+        expect(output).to.include(
+            ',xhttp-download-server=download.example.com,xhttp-download-port=8443,',
+        );
+        expect(output.split(',')).to.include(`encryption-public-keys=${key}`);
+    });
+
+    it('validates Loon VLESS Encryption padding probabilities and ranges', function () {
+        const key = 'A'.repeat(43);
+        const input = `Encrypted=vless,example.com,443,"${UUID}",transport=tcp,encryption-mode=native,encryption-public-keys="${key}"`;
+        for (const [padding, reason] of [
+            ['100-1-1', 'lengths of at least 35'],
+            ['99-35-35', 'first group requires probability 100'],
+            ['100-35-34', 'lengths of at least 35'],
+            ['100--1-35', 'lengths of at least 35'],
+            ['100-36-35', 'ordered non-negative integer bounds'],
+            ['100-35-35.50-5-1', 'ordered non-negative integer bounds'],
+            ['100-35-35.50--1-1', 'ordered non-negative integer bounds'],
+            ['100-35-35.101-0-1', 'probabilities from 0 to 100'],
+        ]) {
+            const proxies = ProxyUtils.parse(
+                `${input},encryption-padding=${padding}`,
+            );
+            expect(proxies).to.have.length(1);
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Loon', proxies),
+            );
+            expect(result, padding).to.be.empty;
+            expect(errors[0]).to.include(reason);
+        }
+
+        for (const padding of ['100-35-35', '100-35-36.75-0-1.50-0-0']) {
+            const proxies = ProxyUtils.parse(
+                `${input},encryption-padding=${padding}`,
+            );
+            expect(produceExternal('Loon', proxies)).to.include(
+                `,encryption-padding=${padding}`,
+            );
+        }
+    });
+
+    it('round-trips Loon Mieru TCP nodes with quoted credentials', function () {
+        const input =
+            'Mieru=mieru,[2001:db8::1],8443," user,name "," pass,word ",udp=true,block-quic=false,ip-mode=prefer-v4,server-dns="system,2001:db8::53"';
+        const [proxy] = ProxyUtils.parse(input);
+        expectSubset(proxy, {
+            type: 'mieru',
+            server: '2001:db8::1',
+            port: 8443,
+            transport: 'TCP',
+            username: ' user,name ',
+            password: ' pass,word ',
+            udp: true,
+            'block-quic': 'off',
+            'ip-version': 'prefer-v4',
+            'server-dns': ['system', '2001:db8::53'],
+        });
+        expect(produceExternal('Loon', proxy)).to.equal(input);
+        const [plain] = ProxyUtils.parse(
+            'Plain=mieru,example.com,8443,"user","pass"',
+        );
+        expect(plain.udp).to.be.false;
+        const uri = 'mierus://user:pass@example.com?port=8443&protocol=TCP#URI';
+        expect(produceExternal('Loon', ProxyUtils.parse(uri))).to.equal(
+            'URI=mieru,example.com,8443,"user","pass",udp=true',
+        );
+    });
+
+    it('requires and trims the server address for Loon Mieru', function () {
+        const proxy = {
+            type: 'mieru',
+            name: 'Mieru',
+            port: 8443,
+            username: 'user',
+            password: 'pass',
+        };
+        for (const server of ['', ' ', '\t ']) {
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Loon', { ...proxy, server }),
+            );
+            expect(result).to.be.empty;
+            expect(errors[0]).to.include('Loon Mieru requires a server');
+        }
+
+        for (const [server, address] of [
+            [' example.com ', 'example.com'],
+            [' 2001:db8::1 ', '[2001:db8::1]'],
+        ]) {
+            expect(produceExternal('Loon', { ...proxy, server })).to.equal(
+                `Mieru=mieru,${address},8443,"user","pass"`,
+            );
+        }
+    });
+
+    it('validates Loon Mieru port and UTF-8 credential ranges', function () {
+        const proxy = {
+            type: 'mieru',
+            name: 'Mieru',
+            server: 'example.com',
+            port: 1,
+            username: '密'.repeat(21) + 'a',
+            password: '🔒'.repeat(16),
+        };
+        for (const port of [1, '65535']) {
+            expect(produceExternal('Loon', { ...proxy, port })).to.include(
+                `,${port},"${proxy.username}","${proxy.password}"`,
+            );
+        }
+
+        for (const settings of [
+            { port: 0 },
+            { port: 65536 },
+            { port: 443.5 },
+            { port: '0x1bb' },
+            { username: '' },
+            { password: '' },
+            { username: '密'.repeat(22) },
+            { password: 'a'.repeat(65) },
+        ]) {
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Loon', { ...proxy, ...settings }),
+            );
+            expect(result).to.be.empty;
+            expect(errors[0]).to.include(
+                'port' in settings ? 'from 1 to 65535' : '1-64 UTF-8 bytes',
+            );
+        }
+    });
+
+    it('rejects non-AEAD VMess over Loon XHTTP', function () {
+        const input = `VMess=vmess,example.com,443,auto,"${UUID}",transport=xhttp,alterId=1`;
+        expect(captureErrors(() => ProxyUtils.parse(input)).result).to.be.empty;
+        expect(
+            captureErrors(() =>
+                produceInternal('Loon', {
+                    name: 'VMess',
+                    type: 'vmess',
+                    server: 'example.com',
+                    port: 443,
+                    uuid: UUID,
+                    aead: false,
+                    network: 'xhttp',
+                }),
+            ).result,
+        ).to.be.empty;
+    });
+
+    it('distinguishes Loon Snell v4/v5 inputs from Surge and emits Loon Snell', function () {
+        const input = [
+            'Surge v4=opensnell,example.com,6160,psk=secret,version=4,reuse=true,udp-relay=true,block-quic=off',
+            'Loon v4=Snell,example.com,6160,"key,with=comma"',
+            'Loon v5=OpenSnell,example.com,6161,psk="secret",version=5,obfs-name=http,obfs-host=cdn.example.com,obfs-uri="/a,b?c=d",udp=true,block-quic=false,ip-mode=prefer-v4,server-dns="system,2001:db8::53"',
+            'Loon block=snell,example.com,6161,psk=secret,version=5,block-quic=true',
+            'Surge default=snell,example.com,6161,psk="key,udp=true",reuse=true,obfs=http,obfs-uri=/obfs',
+        ].join('\n');
+        const proxies = ProxyUtils.parse(input);
+        expect(proxies).to.have.length(5);
+        const [surgeV4, loonV4, loonV5, loonBlock, surgeDefault] = proxies;
+        expect(surgeV4).to.include({
+            type: 'snell',
+            reuse: true,
+            udp: true,
+            'block-quic': 'off',
+        });
+        expect(loonV4).to.include({
+            type: 'snell',
+            psk: 'key,with=comma',
+            version: 4,
+            udp: false,
+        });
+        expect(loonV4).not.to.have.property('block-quic');
+        expectSubset(loonV5, {
+            type: 'snell',
+            version: 5,
+            udp: true,
+            'block-quic': 'off',
+            'ip-version': 'prefer-v4',
+            'server-dns': ['system', '2001:db8::53'],
+            'obfs-opts': {
+                mode: 'http',
+                host: 'cdn.example.com',
+                path: '/a,b?c=d',
+            },
+        });
+        expect(loonBlock).to.include({ udp: false, 'block-quic': 'on' });
+        expect(surgeDefault).to.include({ reuse: true, psk: 'key,udp=true' });
+        expect(surgeDefault).not.to.have.property('version');
+        expect(surgeDefault).not.to.have.property('block-quic');
+
+        const { result: output } = captureErrors(() =>
+            produceExternal('Loon', proxies),
+        );
+        expect(output.split('\n')).to.deep.equal([
+            'Surge v4=snell,example.com,6160,"secret",version=4,udp=true,block-quic=false',
+            'Loon v4=snell,example.com,6160,"key,with=comma",version=4,udp=false',
+            'Loon v5=snell,example.com,6161,"secret",version=5,obfs=http,obfs-host=cdn.example.com,obfs-uri="/a,b?c=d",udp=true,block-quic=false,ip-mode=prefer-v4,server-dns="system,2001:db8::53"',
+            'Loon block=snell,example.com,6161,"secret",version=5,udp=false,block-quic=true',
+        ]);
+        expect(ProxyUtils.parse(output).slice(1)).to.deep.equal(
+            proxies.slice(1, 4),
+        );
+    });
+
+    it('produces Loon VLESS reality websocket lines with encryption and Vision', function () {
+        const publicKey = 'A'.repeat(43);
         const output = produceExternal('Loon', {
             type: 'vless',
             name: 'Loon Reality',
@@ -625,6 +1756,7 @@ describe('Proxy text producers', function () {
             tls: true,
             sni: 'sni.example.com',
             flow: 'xtls-rprx-vision',
+            encryption: `mlkem768x25519plus.native.1rtt.${publicKey}`,
             network: 'ws',
             'ws-opts': {
                 path: '/ws',
@@ -640,7 +1772,7 @@ describe('Proxy text producers', function () {
         });
 
         expect(output).to.equal(
-            `Loon Reality=vless,vless.example.com,443,"${UUID}",transport=ws,path=/ws,host=cdn.example.com,over-tls=true,skip-cert-verify=true,flow=xtls-rprx-vision,sni=sni.example.com,public-key="pubkey",short-id=08`,
+            `Loon Reality=vless,vless.example.com,443,"${UUID}",transport=ws,path=/ws,host=cdn.example.com,over-tls=true,skip-cert-verify=true,encryption-mode=native,encryption-rtt=1rtt,encryption-public-keys=${publicKey},flow=xtls-rprx-vision,sni=sni.example.com,public-key="pubkey",short-id=08`,
         );
     });
 
@@ -875,6 +2007,7 @@ describe('Proxy text producers', function () {
                 server: 'vless-xtls.example.com',
                 port: 443,
                 uuid: UUID,
+                tls: true,
                 flow: 'xtls-rprx-vision',
                 sni: 'sni.example.com',
                 'client-fingerprint': 'chrome',
@@ -1310,6 +2443,214 @@ describe('Proxy text producers', function () {
             sni: 'sni.example.com',
             'name-cert-verify': nameCertVerify,
         });
+    });
+
+    it('round-trips Surge client-fingerprint for TLS proxies', function () {
+        const cases = [
+            ['https', '', 'auto'],
+            ['socks5-tls', '', 'none'],
+            ['h2-connect', '', 'apple-26', 'ios'],
+            ['trust-tunnel', '', 'chromium-155', 'chrome'],
+            ['trojan', ',password=secret', 'chromium-155', 'chrome'],
+            ['anytls', ',password=secret', 'none'],
+            ['vmess', `,username=${UUID},tls=true`, 'apple-26', 'ios'],
+            ['vless', `,username=${UUID},tls=true`, 'auto'],
+            [
+                'vless',
+                `,username=${UUID},reality-public-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
+                'chromium-155',
+                'chrome',
+            ],
+        ];
+
+        for (const [type, params, fingerprint, generic] of cases) {
+            const [proxy] = ProxyUtils.parse(
+                `Fingerprint=${type},example.com,443,client-fingerprint="${fingerprint}"${params}`,
+            );
+            expect(proxy, type).to.have.property(
+                '_surge_client_fingerprint',
+                fingerprint,
+            );
+            expect(proxy['client-fingerprint'], type).to.equal(generic);
+
+            for (const target of ['Surge', 'SurgeMac']) {
+                const output = produceExternal(target, proxy);
+                expect(output).to.match(
+                    new RegExp(`,client-fingerprint=${fingerprint}(?:,|$)`),
+                );
+                expect(ProxyUtils.parse(output)[0]).to.have.property(
+                    '_surge_client_fingerprint',
+                    fingerprint,
+                );
+            }
+        }
+    });
+
+    it('maps share links to Surge client-fingerprint values', function () {
+        const trojan = 'trojan://secret@example.com:443';
+        const cases = [
+            [`${trojan}?fp=chrome`, 'chromium-155'],
+            [`${trojan}?fp=edge`, 'chromium-155'],
+            [`${trojan}?fp=360`, 'chromium-155'],
+            [`${trojan}?fp=qq`, 'chromium-155'],
+            [`${trojan}?fp=chrome120`, 'chromium-155'],
+            [`${trojan}?fp=HelloChrome_120`, 'chromium-155'],
+            [`${trojan}?fp=HelloIOS_14`, 'apple-26'],
+            [`${trojan}?fp=firefox`, 'auto'],
+            [`${trojan}?fp=golang`, 'auto'],
+            [`${trojan}?fp=HelloRandomizedNoALPN`, 'auto'],
+            [`${trojan}?fp=unknown`, undefined],
+            [trojan, undefined],
+            ['https://example.com:443?fp=android', 'chromium-155'],
+            [
+                'socks5+tls://example.com:443?client-fingerprint=safari',
+                'apple-26',
+            ],
+            ['anytls://secret@example.com:443?fp=none', 'none'],
+            [`vmess://${UUID}@example.com:443?security=tls&fp=ios`, 'apple-26'],
+            [
+                `vless://${UUID}@example.com:443?security=reality&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&fp=chrome`,
+                'chromium-155',
+            ],
+        ];
+
+        for (const [link, fingerprint] of cases) {
+            const output = produceExternal('Surge', ProxyUtils.parse(link));
+            expect(
+                output.match(/,client-fingerprint=([^,]+)/)?.[1],
+                link,
+            ).to.equal(fingerprint);
+        }
+    });
+
+    it('omits Surge client-fingerprint for plaintext and QUIC proxies', function () {
+        for (const [type, params] of [
+            ['http', ''],
+            ['socks5', ''],
+            ['vmess', `,username=${UUID},tls=false`],
+            ['vless', `,username=${UUID}`],
+            ['trust-tunnel', ',h3=true'],
+            ['tuic', ',token=secret'],
+            ['hysteria2', ',password=secret'],
+            ['masque', ''],
+        ]) {
+            const [proxy] = ProxyUtils.parse(
+                `Fingerprint=${type},example.com,443,client-fingerprint=apple-26${params}`,
+            );
+            expect(proxy, type).to.not.have.property(
+                '_surge_client_fingerprint',
+            );
+            expect(proxy, type).to.not.have.property('client-fingerprint');
+            const output = produceExternal('Surge', {
+                ...proxy,
+                'client-fingerprint': 'chrome',
+            });
+            expect(output).to.not.include('client-fingerprint=');
+        }
+    });
+
+    it('round-trips Surge ech-config for TLS and QUIC proxies', function () {
+        const config = 'AQID+///AA==';
+        const echOpts = { enable: true, config };
+        const cases = [
+            ['https', '', config],
+            ['socks5-tls', '', '"AQID-___AA"'],
+            ['h2-connect', '', `'${config}'`],
+            ['trust-tunnel', ',h3=true', config],
+            ['trojan', ',password=secret', config],
+            ['anytls', ',password=secret', config],
+            ['vmess', `,username=${UUID},tls=true`, config],
+            ['vless', `,username=${UUID},tls=true`, config],
+            ['tuic', ',token=secret', config],
+            ['tuic-v5', `,uuid=${UUID},password=secret`, config],
+            ['hysteria2', ',password=secret', config],
+            ['masque', '', config],
+        ];
+
+        for (const [type, params, value] of cases) {
+            const [proxy] = ProxyUtils.parse(
+                `ECH=${type},example.com,443,ech-config=${value},sni=sni.example.com${params}`,
+            );
+            expectSubset(proxy, {
+                'ech-opts': echOpts,
+                sni: 'sni.example.com',
+            });
+
+            for (const target of ['Surge', 'SurgeMac']) {
+                const output = produceExternal(target, proxy);
+                expect(output).to.include(`,ech-config=${config}`);
+                expect(ProxyUtils.parse(output)[0]['ech-opts']).to.deep.equal(
+                    echOpts,
+                );
+            }
+        }
+    });
+
+    it('emits Surge ech-config from a VLESS share link with a static list', function () {
+        const [proxy] = ProxyUtils.parse(
+            `vless://${UUID}@example.com:443?security=tls&ech=AQID-___AA`,
+        );
+
+        expect(produceExternal('Surge', proxy)).to.include(
+            ',ech-config=AQID+///AA==',
+        );
+    });
+
+    it('honors TLS, ECH enablement, and REALITY when producing Surge proxies', function () {
+        const config = 'AQID+///AA==';
+        const echOpts = { enable: true, config };
+        const [tls] = ProxyUtils.parse(
+            `Test=vless,example.com,443,username=${UUID},tls=true`,
+        );
+        const realityKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+        const reality = { 'public-key': realityKey };
+
+        expect(
+            produceExternal('Surge', {
+                ...tls,
+                'ech-opts': { enable: false, config },
+                _echConfigList: config,
+            }),
+        ).to.not.include('ech-config=');
+        expect(
+            produceExternal('Surge', {
+                ...tls,
+                tls: false,
+                'ech-opts': echOpts,
+            }),
+        ).to.not.include('ech-config=');
+
+        const realityOutput = produceExternal('Surge', {
+            ...tls,
+            'reality-opts': reality,
+            'ech-opts': echOpts,
+        });
+        expect(realityOutput).to.include(`,reality-public-key=${realityKey}`);
+        expect(realityOutput).to.not.include('ech-config=');
+        expect(ProxyUtils.parse(`${realityOutput},ech-config=${config}`)).to.be
+            .empty;
+    });
+
+    it('filters ECH-enabled nodes without a static list from Surge output', function () {
+        const [proxy] = ProxyUtils.parse('ECH=https,example.com,443');
+        const [invalid] = ProxyUtils.parse(
+            'ECH=https,example.com,443,ech-config=bad!',
+        );
+        const dns = { enable: true, 'query-server-name': 'ech.example.com' };
+        const unsafe = { enable: true, config: 'AQID,skip-cert-verify=true' };
+
+        for (const candidate of [
+            invalid,
+            { ...proxy, 'ech-opts': dns },
+            { ...proxy, 'ech-opts': unsafe },
+        ]) {
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Surge', candidate),
+            );
+
+            expect(result).to.be.empty;
+            expect(errors[0]).to.include('requires an inline ECHConfigList');
+        }
     });
 
     it('round-trips Surge TrustTunnel h3 as network', function () {
@@ -2008,6 +3349,42 @@ describe('Proxy text producers', function () {
         expect(output).to.not.include('ipv6-cidr');
     });
 
+    it('round-trips supported Surge WireGuard policy parameters', function () {
+        const [proxy] = ProxyUtils.parse(
+            'WG=wireguard,section-name="office,2",underlying-proxy=Entry,ip-version=dual,no-error-alert=true,' +
+                'test-url=http://10.0.0.1/check?a=b,test-timeout=8,test-udp=example.com@10.0.0.1,' +
+                'hybrid=on,tos=0x88,tfo=false,block-quic=adaptive,ecn=false,' +
+                'interface=en1,allow-other-interface=true,dns-follow-interface=true,' +
+                'shadow-tls-version=3,shadow-tls-password="unused,with=padding=="',
+        );
+        expectSubset(proxy, {
+            type: 'wireguard-surge',
+            'section-name': 'office,2',
+            'underlying-proxy': 'Entry',
+            'ip-version': 'dual',
+            'no-error-alert': 'true',
+            'test-url': 'http://10.0.0.1/check?a=b',
+            'test-timeout': 8,
+            'test-udp': 'example.com@10.0.0.1',
+            hybrid: 'on',
+            tos: 136,
+            tfo: false,
+            'block-quic': 'adaptive',
+            ecn: false,
+        });
+        expect(proxy).to.not.have.any.keys('interface-name', 'plugin');
+
+        for (const target of ['Surge', 'SurgeMac']) {
+            const output = produceExternal(target, proxy);
+            expect(output).to.equal(
+                'WG=wireguard,section-name="office,2",ip-version=dual,no-error-alert=true,tfo=false,' +
+                    'test-url=http://10.0.0.1/check?a=b,test-timeout=8,test-udp=example.com@10.0.0.1,' +
+                    'hybrid=on,tos=136,block-quic=adaptive,ecn=false,underlying-proxy=Entry',
+            );
+            expect(ProxyUtils.parse(output)).to.deep.equal([proxy]);
+        }
+    });
+
     it('produces Surge WireGuard sections without leaking CIDR metadata fields', function () {
         const output = produceExternal(
             'Surge',
@@ -2022,15 +3399,129 @@ describe('Proxy text producers', function () {
                 ipv6: 'fd00::2',
                 'ip-cidr': 24,
                 'ipv6-cidr': 64,
+                'allow-peer-access': false,
             },
             { 'include-unsupported-proxy': true },
         );
 
         expect(output).to.include('# > WireGuard Proxy Surge WG');
+        expect(output).to.include('\nprivate-key = private-key\n');
         expect(output).to.include('self-ip = 10.0.0.2');
         expect(output).to.include('self-ip-v6 = fd00::2');
+        expect(output).to.include('allow-peer-access = false');
+        expect(output).to.include('allowed-ips = "0.0.0.0/0,::/0"');
         expect(output).to.not.include('ip-cidr');
         expect(output).to.not.include('ipv6-cidr');
+    });
+
+    it('exports a Surge WireGuard keystore reference as the only private key field', function () {
+        for (const target of ['Surge', 'SurgeMac']) {
+            for (const privateKey of [undefined, 'inline-key']) {
+                const output = produceExternal(
+                    target,
+                    {
+                        type: 'wireguard',
+                        name: 'WG',
+                        server: 'wg.example.com',
+                        port: 51820,
+                        ip: '10.0.0.2',
+                        'public-key': 'peer-key',
+                        'private-key': privateKey,
+                        'private-key-keystore-name': 'office-key',
+                    },
+                    { 'include-unsupported-proxy': true },
+                );
+                expect(output).to.include(
+                    '[WireGuard WG]\nprivate-key-keystore-name = office-key\n',
+                );
+                expect(output).to.not.include('\nprivate-key =');
+                expect(output).to.not.include('inline-key');
+            }
+        }
+    });
+
+    it('exports Surge WireGuard listeners with every peer and its own fields', function () {
+        const proxy = {
+            type: 'wireguard',
+            name: 'Home WG',
+            'section-name': 'home-wg',
+            'private-key': 'private-key',
+            ip: '10.0.0.1/24',
+            ipv6: 'fd00::1/64',
+            'dns-server': ['10.0.0.53', '[fd00::53]:5353', 'system'],
+            'prefer-ipv6': false,
+            'ip-version': 'ipv6-prefer',
+            'allow-peer-access': false,
+            'accept-incoming': true,
+            'listen-port': '51820',
+            'underlying-proxy': 'Entry',
+            'interface-name': 'en1',
+            'allow-other-interface': true,
+            plugin: 'shadow-tls',
+            'plugin-opts': { version: 3, password: 'unused' },
+            ecn: false,
+            peers: [
+                {
+                    'public-key': 'phone-key',
+                    'allowed-ips': ['10.0.0.2/32'],
+                    'persistent-keepalive': 0,
+                    keepalive: 25,
+                    'client-id': 'aabbcc',
+                },
+                {
+                    'public-key': 'router-key',
+                    'allowed-ips': ['10.20.0.0/24', 'fd20::/64'],
+                    server: '2001:db8::10',
+                    port: 51821,
+                    reserved: [83, 12, 235],
+                    'pre-shared-key': 'shared-key',
+                },
+                {
+                    'public-key': 'laptop-key',
+                    'allowed-ips': '"10.0.0.3/32, fd00::3/128"',
+                    endpoint: 'laptop.example.com:51822',
+                    'client-id': 'AQID',
+                },
+            ],
+        };
+
+        for (const target of ['Surge', 'SurgeMac']) {
+            const output = produceExternal(target, proxy, {
+                'include-unsupported-proxy': true,
+            });
+            expect(output).to.include(
+                '# Home WG=wireguard,section-name=home-wg,ip-version=prefer-v6,ecn=false\n',
+            );
+            expect(output.split('[WireGuard home-wg]\n')[1]).to.equal(
+                [
+                    'private-key = private-key',
+                    'self-ip = 10.0.0.1',
+                    'self-ip-v6 = fd00::1',
+                    'dns-server = 10.0.0.53, [fd00::53]:5353, system',
+                    'prefer-ipv6 = false',
+                    'listen-port = 51820',
+                    'peer = (public-key = phone-key, allowed-ips = "10.0.0.2/32", keepalive = 0, client-id = 0xaabbcc)',
+                    'peer = (public-key = router-key, allowed-ips = "10.20.0.0/24,fd20::/64", endpoint = [2001:db8::10]:51821, client-id = 83/12/235, preshared-key = shared-key)',
+                    'peer = (public-key = laptop-key, allowed-ips = "10.0.0.3/32, fd00::3/128", endpoint = laptop.example.com:51822, client-id = AQID)',
+                ].join('\n'),
+            );
+        }
+    });
+
+    it('exports WireGuard URI preshared keys and normalizes legacy peer access for Surge', function () {
+        const [proxy] = ProxyUtils.parse(
+            'wireguard://private-key@wg.example.com:51820/?address=10.0.0.2&publickey=peer-key&presharedkey=shared%2Bkey%3D&allowed-ips=10.0.0.0%2F24&accept-incoming=true&ip-version=ipv6-prefer#WG',
+        );
+        const output = produceExternal('Surge', proxy, {
+            'include-unsupported-proxy': true,
+        });
+        expect(output).to.include(
+            'prefer-ipv6 = true\nallow-peer-access = true',
+        );
+        expect(output).to.include(
+            'peer = (public-key = peer-key, allowed-ips = "10.0.0.0/24", endpoint = wg.example.com:51820, preshared-key = shared+key=)',
+        );
+        expect(output).to.not.include('accept-incoming');
     });
 
     it('produces Surfboard trojan websocket lines', function () {
@@ -2054,6 +3545,183 @@ describe('Proxy text producers', function () {
         expect(output).to.equal(
             'Trojan=trojan,trojan.example.com,443,password=secret,ws=true,ws-path=/ws,ws-headers=Host:"cdn.example.com",tls=true,sni="sni.example.com"',
         );
+    });
+
+    it('round-trips Surfboard VLESS transport options', function () {
+        const prefix = `VLESS=vless,vless.example.com,443,username=${UUID}`;
+        for (const params of [
+            'tls=true,skip-cert-verify=false,sni=off,alpn="h2,http/1.1",udp-relay=false,block-quic=off,underlying-proxy=Relay',
+            'ws=true,ws-path=/ws,ws-headers=Host:cdn.example.com,tls=true',
+            'ws=true,ws-http-upgrade=true,ws-path=/upgrade,tls=true',
+            'grpc=true,grpc-service-name=/edge/tunnel,grpc-mode=multi,grpc-authority=grpc.example.com,tls=true',
+            'xhttp=true,xhttp-path="/edge?a=1,2",xhttp-host=cdn.example.com,xhttp-mode=packet-up,xhttp-padding-obfs=false,xhttp-xmux-keep-alive=0,xhttp-headers=X-Test:demo,tls=true',
+        ]) {
+            const line = `${prefix},${params}`;
+            const [proxy] = ProxyUtils.parse(line);
+            const output = produceExternal('Surfboard', proxy);
+
+            expect(output).to.include(line);
+            expectSubset(ProxyUtils.parse(output)[0], proxy);
+        }
+    });
+
+    it('produces Surfboard VLESS from a RAW REALITY share link', function () {
+        const key = 'A'.repeat(43);
+        const [proxy] = ProxyUtils.parse(
+            `vless://${UUID}@192.0.2.1:443?type=raw&security=reality&pbk=${key}&sid=0012&sni=sni.example.com&flow=xtls-rprx-vision#VLESS`,
+        );
+
+        expect(produceExternal('Surfboard', proxy)).to.equal(
+            `VLESS=vless,192.0.2.1,443,username=${UUID},flow=xtls-rprx-vision,reality-public-key=${key},reality-short-id=0012,sni=sni.example.com,udp-relay=true`,
+        );
+    });
+
+    describe('Surfboard VLESS export and reparse', function () {
+        const proxy = {
+            type: 'vless',
+            name: 'VLESS',
+            server: 'vless.example.com',
+            port: 443,
+            uuid: UUID,
+        };
+
+        it('skips incompatible Surfboard VLESS security and transport combinations', function () {
+            const flow = 'xtls-rprx-vision';
+            const reality = {
+                'reality-opts': { 'public-key': 'A'.repeat(43) },
+            };
+            const unsupported = [
+                { network: 'grpc' },
+                { network: 'grpc', flow, ...reality },
+                { network: 'ws', ...reality },
+                { network: 'ws', tls: true, flow, encryption: 'none' },
+                { network: 'xhttp', flow, ...reality },
+                { network: 'tcp', flow },
+            ];
+            const { result, errors } = captureErrors(() =>
+                produceInternal('Surfboard', [
+                    {
+                        ...proxy,
+                        name: 'Supported',
+                        network: 'grpc',
+                        ...reality,
+                    },
+                    ...unsupported.map((options) => ({ ...proxy, ...options })),
+                ]),
+            );
+
+            expect(result).to.have.length(1);
+            expect(result[0]).to.match(/^Supported=vless,/);
+            expect(errors).to.have.length(unsupported.length);
+        });
+
+        it('allows only documented Surfboard VLESS flow values', function () {
+            const supported = ['xtls-rprx-vision', 'xtls-rprx-vision-udp443'];
+            const { result, errors } = captureErrors(() =>
+                produceInternal(
+                    'Surfboard',
+                    [...supported, 'typo'].map((flow) => ({
+                        ...proxy,
+                        tls: true,
+                        flow,
+                    })),
+                ),
+            );
+
+            expect(
+                result.map((line) => line.match(/,flow=([^,]+)/)?.[1]),
+            ).to.deep.equal(supported);
+            expect(errors).to.have.length(1);
+            expect(errors[0]).to.include('Unsupported VLESS flow');
+        });
+
+        it('quotes Surfboard VLESS parameter values containing semicolons or whitespace', function () {
+            for (const path of ['/edge;a=1', '/edge?a=1 2']) {
+                const output = produceExternal('Surfboard', {
+                    ...proxy,
+                    network: 'xhttp',
+                    'xhttp-opts': { path },
+                    'underlying-proxy': 'Next Proxy',
+                });
+
+                expect(output).to.include(`,xhttp-path="${path}"`);
+                expect(output).to.include(',underlying-proxy="Next Proxy"');
+                expect(ProxyUtils.parse(output)[0]).to.have.property(
+                    'underlying-proxy',
+                    'Next Proxy',
+                );
+            }
+        });
+
+        it('skips Surfboard VLESS headers containing literal pipe separators', function () {
+            for (const network of ['ws', 'xhttp']) {
+                const { result, errors } = captureErrors(() =>
+                    produceInternal('Surfboard', {
+                        ...proxy,
+                        network,
+                        [`${network}-opts`]: {
+                            headers: { 'X-Token': 'alpha|beta' },
+                        },
+                    }),
+                );
+
+                expect(result).to.deep.equal([]);
+                expect(errors[0]).to.include('header');
+            }
+        });
+
+        it('reparses escaped Surfboard VLESS transport paths and headers', function () {
+            const path = String.raw`/edge?a=1,"2"\tail`;
+            const headers = {
+                'X-Test': String.raw`"a,b" \path`,
+                'X-Next': 'last',
+            };
+            for (const network of ['ws', 'xhttp']) {
+                const output = produceExternal('Surfboard', {
+                    ...proxy,
+                    network,
+                    tls: true,
+                    [`${network}-opts`]: { path, headers },
+                });
+
+                expect(output).to.include(
+                    String.raw`,${network}-path="/edge?a=1,\"2\"\\tail"`,
+                );
+                const [reparsed] = ProxyUtils.parse(output);
+                expectSubset(reparsed, {
+                    tls: true,
+                    [`${network}-opts`]: { path, headers },
+                });
+            }
+
+            const [reparsed] = ProxyUtils.parse(
+                String.raw`VLESS=vless,vless.example.com,443,username=${UUID},xhttp=true,xhttp-path="/\d"`,
+            );
+            expect(reparsed['xhttp-opts'].path).to.equal(String.raw`/\d`);
+
+            const legacyPath = '/edge with space\\';
+            const [legacy] = ProxyUtils.parse(
+                `VLESS=vless,vless.example.com,443,username=${UUID},xhttp=true,xhttp-path="${legacyPath}",xhttp-host="cdn.example.com"`,
+            );
+            expect(legacy['xhttp-opts'].path).to.equal(legacyPath);
+        });
+
+        it('decodes escapes in single-quoted Surfboard VLESS fields', function () {
+            const [parsed] = ProxyUtils.parse(
+                String.raw`VLESS=vless,vless.example.com,443,username=${UUID},xhttp=true,xhttp-path='/edge\\tail?value=\"one,two\"\d',xhttp-headers='X-Test:alpha\\beta \"demo\"\d|X-Next:last',tls=true`,
+            );
+
+            expectSubset(parsed, {
+                tls: true,
+                'xhttp-opts': {
+                    path: String.raw`/edge\tail?value="one,two"\d`,
+                    headers: {
+                        'X-Test': String.raw`alpha\beta "demo"\d`,
+                        'X-Next': 'last',
+                    },
+                },
+            });
+        });
     });
 
     it('produces Surfboard Hysteria2 lines', function () {
@@ -2312,19 +3980,21 @@ describe('Proxy text producers', function () {
     });
 
     it('produces Surfboard Snell versions 1 through 5', function () {
+        const psk = String.raw`secret\\key`;
         for (const version of [1, 2, 3, 4, 5]) {
             const output = produceExternal('Surfboard', {
                 type: 'snell',
                 name: `Surfboard Snell ${version}`,
                 server: 'snell.example.com',
                 port: 443,
-                psk: 'secret',
+                psk,
                 version,
             });
 
             expect(output).to.equal(
-                `Surfboard Snell ${version}=snell,snell.example.com,443,version=${version},psk="secret"`,
+                `Surfboard Snell ${version}=snell,snell.example.com,443,version=${version},psk="${psk}"`,
             );
+            expect(ProxyUtils.parse(output)[0].psk).to.equal(psk);
         }
     });
 
@@ -6364,6 +8034,44 @@ describe('Proxy text producers', function () {
             expect(parsed[0].password).to.equal(password);
         });
     }
+
+    it('round-trips Mieru through URI and V2Ray exports', function () {
+        const proxies = [
+            {
+                type: 'mieru',
+                name: 'Mieru #1',
+                server: '2001:db8::1',
+                username: 'user:name',
+                password: 'p@ss:w/rd#1?',
+                'port-range': '8000-8002',
+                transport: 'UDP',
+                multiplexing: 'MULTIPLEXING_HIGH',
+                'handshake-mode': 'HANDSHAKE_NO_WAIT',
+                'traffic-pattern': 'CI+/AQ==',
+            },
+            {
+                type: 'mieru',
+                name: 'Mieru TCP',
+                server: 'example.com',
+                username: 'user',
+                password: 'pass',
+                port: 443,
+            },
+        ];
+        const uri = produceExternal('URI', proxies);
+        const v2ray = produceExternal('V2Ray', proxies);
+
+        expect(uri.split('\n')).to.deep.equal([
+            'mierus://user%3Aname:p%40ss%3Aw%2Frd%231%3F@[2001:db8::1]?port=8000-8002&protocol=UDP&profile=Mieru%20%231&multiplexing=MULTIPLEXING_HIGH&handshake-mode=HANDSHAKE_NO_WAIT&traffic-pattern=CI%2B%2FAQ%3D%3D',
+            'mierus://user:pass@example.com?port=443&protocol=TCP&profile=Mieru%20TCP',
+        ]);
+        expect(Base64.decode(v2ray)).to.equal(uri);
+
+        const parsed = ProxyUtils.parse(v2ray);
+        expect(parsed).to.have.length(2);
+        expectSubset(parsed[0], proxies[0]);
+        expectSubset(parsed[1], { ...proxies[1], transport: 'TCP' });
+    });
 
     it('keeps every h2 host in URI VMess links', function () {
         const output = produceExternal('URI', {

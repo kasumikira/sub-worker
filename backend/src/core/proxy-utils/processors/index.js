@@ -145,6 +145,7 @@ function QuickSettingOperator(args) {
                 );
             }
 
+            const ecn = getSwitchMode(args.ecn, get(args.ecn));
             return proxies.map((proxy) => {
                 proxy.udp = get(args.udp, proxy.udp);
                 proxy.tfo = get(args.tfo, proxy.tfo);
@@ -159,10 +160,14 @@ function QuickSettingOperator(args) {
                 if (['snell', 'anytls', 'trusttunnel'].includes(proxy.type)) {
                     proxy.reuse = get(args.reuse, proxy.reuse);
                 }
-                if (['tuic', 'hysteria2'].includes(proxy.type)) {
-                    proxy.ecn = get(args.ecn, proxy.ecn);
+                if (
+                    ecn !== undefined &&
+                    proxy.type !== 'direct' &&
+                    proxy.type !== 'external'
+                ) {
+                    proxy.ecn = ecn;
                 }
-                proxy['block-quic'] = getBlockQuic(
+                proxy['block-quic'] = getSwitchMode(
                     args['block-quic'],
                     proxy['block-quic'],
                 );
@@ -186,7 +191,7 @@ function QuickSettingOperator(args) {
         }
     }
 
-    function getBlockQuic(value, defaultValue) {
+    function getSwitchMode(value, defaultValue) {
         switch (value) {
             case 'auto':
             case 'on':
@@ -347,10 +352,11 @@ function RegexSortOperator(input) {
     return {
         name: 'Regex Sort Operator',
         func: (proxies) => {
-            expressions = expressions.map((expr) => buildRegex(expr));
+            const regexes = expressions.map((expr) => buildRegex(expr));
+            const ranks = new Map();
             return proxies.sort((a, b) => {
-                const oA = getRegexOrder(expressions, a.name);
-                const oB = getRegexOrder(expressions, b.name);
+                const oA = getRegexOrder(regexes, a.name, ranks);
+                const oB = getRegexOrder(regexes, b.name, ranks);
                 if (oA && !oB) return -1;
                 if (oB && !oA) return 1;
                 if (oA && oB) return oA < oB ? -1 : 1;
@@ -366,7 +372,11 @@ function RegexSortOperator(input) {
     };
 }
 
-function getRegexOrder(expressions, str) {
+function getRegexOrder(expressions, str, ranks) {
+    if (expressions.length === 0) return null;
+    const cached = ranks.get(str);
+    if (cached !== undefined) return cached;
+
     let order = null;
     for (let i = 0; i < expressions.length; i++) {
         if (expressions[i].test(str)) {
@@ -374,6 +384,7 @@ function getRegexOrder(expressions, str) {
             break;
         }
     }
+    if (typeof str === 'string') ranks.set(str, order);
     return order;
 }
 

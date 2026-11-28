@@ -62,6 +62,10 @@ export default function QX_Producer() {
                 return vless(proxy);
             case 'anytls':
                 return anytls(proxy);
+            case 'hysteria2':
+                return hysteria2(proxy);
+            case 'mieru':
+                return mieru(proxy);
         }
         throw new Error(
             `Platform ${targetPlatform} does not support proxy type: ${proxy.type}`,
@@ -192,7 +196,10 @@ function shadowsocks(proxy) {
         );
     }
 
-    if (needTls(proxy)) {
+    if (
+        needTls(proxy) ||
+        (proxy.plugin === 'v2ray-plugin' && proxy['plugin-opts']?.tls)
+    ) {
         appendIfPresent(
             `,tls-pubkey-sha256=${proxy['tls-pubkey-sha256']}`,
             'tls-pubkey-sha256',
@@ -610,6 +617,67 @@ function anytls(proxy) {
     return result.toString();
 }
 
+function hysteria2(proxy) {
+    const obfs = proxy.obfs || 'salamander';
+    if (!['salamander', 'gecko'].includes(obfs)) {
+        throw new Error(
+            'QX Hysteria 2 only supports Salamander and Gecko obfuscation',
+        );
+    }
+
+    const result = new Result(proxy);
+    result.append(`hysteria2=${proxy.server}:${proxy.port}`);
+    result.appendIfPresent(`,password=${proxy.password}`, 'password');
+    const ports = String(proxy.ports || '').trim();
+    if (ports) result.append(`,port-hopping=${ports.replace(/;/g, ',')}`);
+
+    const interval = Number(proxy['hop-interval']);
+    if (Number.isInteger(interval) && interval >= 5 && interval <= 3600) {
+        result.append(`,port-hopping-interval=${interval}`);
+    }
+    if (isPresent(proxy, 'obfs-password')) {
+        const obfsPassword = String(proxy['obfs-password']);
+        if (Buffer.byteLength(obfsPassword, 'utf8') < 4) {
+            throw new Error(
+                `QX Hysteria 2 ${obfs}-password must be at least 4 bytes`,
+            );
+        }
+        result.append(`,${obfs}-password=${obfsPassword}`);
+    } else if (obfs === 'gecko') {
+        throw new Error(
+            'QX Hysteria 2 Gecko obfuscation requires gecko-password',
+        );
+    }
+    result.appendIfPresent(`,tls-host=${proxy.sni}`, 'sni');
+    result.appendIfPresent(
+        `,tls-pubkey-sha256=${proxy['tls-pubkey-sha256']}`,
+        'tls-pubkey-sha256',
+    );
+    appendTlsAlpn(result, proxy);
+    result.appendIfPresent(
+        `,tls-no-session-ticket=${proxy['tls-no-session-ticket']}`,
+        'tls-no-session-ticket',
+    );
+    result.appendIfPresent(
+        `,tls-no-session-reuse=${proxy['tls-no-session-reuse']}`,
+        'tls-no-session-reuse',
+    );
+    result.appendIfPresent(
+        `,tls-cert-sha256=${proxy['tls-fingerprint']}`,
+        'tls-fingerprint',
+    );
+    appendTlsVerification(result, proxy);
+    const bandwidth = String(proxy.down).match(/^\s*(\d+)/)?.[1];
+    if (bandwidth) result.append(`,download-bandwidth=${bandwidth}`);
+    result.appendIfPresent(`,udp-relay=${proxy.udp}`, 'udp');
+    result.appendIfPresent(
+        `,server_check_url=${proxy['test-url']}`,
+        'test-url',
+    );
+    result.append(`,tag=${proxy.name}`);
+    return result.toString();
+}
+
 function http(proxy) {
     const result = new Result(proxy);
     const append = result.append.bind(result);
@@ -722,6 +790,57 @@ function socks5(proxy) {
 
     // tag
     append(`,tag=${proxy.name}`);
+
+    return result.toString();
+}
+
+function mieru(proxy) {
+    const result = new Result(proxy);
+
+    result.append(`mieru=${proxy.server}:${proxy.port}`);
+    result.appendIfPresent(`,username=${proxy.username}`, 'username');
+    result.appendIfPresent(`,password=${proxy.password}`, 'password');
+
+    if (needTls(proxy)) {
+        proxy.tls = true;
+    }
+    result.appendIfPresent(`,over-tls=${proxy.tls}`, 'tls');
+
+    if (needTls(proxy)) {
+        result.appendIfPresent(
+            `,tls-pubkey-sha256=${proxy['tls-pubkey-sha256']}`,
+            'tls-pubkey-sha256',
+        );
+        appendTlsAlpn(result, proxy);
+        result.appendIfPresent(
+            `,tls-no-session-ticket=${proxy['tls-no-session-ticket']}`,
+            'tls-no-session-ticket',
+        );
+        result.appendIfPresent(
+            `,tls-no-session-reuse=${proxy['tls-no-session-reuse']}`,
+            'tls-no-session-reuse',
+        );
+        result.appendIfPresent(
+            `,tls-cert-sha256=${proxy['tls-fingerprint']}`,
+            'tls-fingerprint',
+        );
+
+        appendTlsVerification(result, proxy);
+        result.appendIfPresent(`,tls-host=${proxy.sni}`, 'sni');
+    }
+
+    result.appendIfPresent(`,fast-open=${proxy.tfo}`, 'tfo');
+    result.appendIfPresent(`,udp-relay=${proxy.udp}`, 'udp');
+    if (proxy.udp === true) {
+        result.append(',udp-over-tcp=true');
+    }
+
+    result.appendIfPresent(
+        `,server_check_url=${proxy['test-url']}`,
+        'test-url',
+    );
+
+    result.append(`,tag=${proxy.name}`);
 
     return result.toString();
 }
